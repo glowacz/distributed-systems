@@ -1,0 +1,1 @@
+/home/glowacz/Documents/Studia/ds/dslab01/target/debug/lab01: /home/glowacz/Documents/Studia/ds/dslab01/main.rs /home/glowacz/Documents/Studia/ds/dslab01/public_test.rs /home/glowacz/Documents/Studia/ds/dslab01/solution.rs
