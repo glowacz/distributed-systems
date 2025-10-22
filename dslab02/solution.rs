@@ -4,9 +4,6 @@ use std::thread::{self, JoinHandle};
 
 type Task = Box<dyn FnOnce() + Send>;
 
-// You can define new types (e.g., structs) if you need.
-// However, they shall not be public (i.e., do not use the `pub` keyword).
-
 /// The thread pool.
 pub struct Threadpool {
     // Add here any fields you need.
