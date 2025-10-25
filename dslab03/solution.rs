@@ -45,8 +45,13 @@ impl DividerModule {
         // The identifier is an opaque number for your code!
         // It represents the idea that modules refer to each other
         // by sending messages at an address.
+        
         let id = Ident::new();
-        unimplemented!("Register");
+        let divider_mod = DividerModule { id, other: Option::None, queue: queue.clone() };
+        
+        let msg = Message::System(SystemMessage::RegisterModule(Module::Divider(divider_mod)));
+        queue.send(msg).unwrap();
+
         id
     }
 }
@@ -74,7 +79,9 @@ impl MessageHandler for DividerModule {
     ///
     /// The module finishes its initialization.
     fn init(&mut self, other: Ident) {
-        unimplemented!("Process");
+        self.other = Some(other);
+        println!("Initializing Divider Module, its id is {:?}", self.id)
+        // unimplemented!("Process");
     }
 }
 
@@ -83,7 +90,9 @@ impl MultiplierModule {
     pub(crate) fn create(some_num: Num, queue: Sender<Message>) -> Ident {
         // The identifier is an opaque number for your code!
         let id = Ident::new();
-        unimplemented!("Register");
+        let multiplier_mod = MultiplierModule { num: some_num, id, other: Option::None, queue: queue.clone() };
+        let msg = Message::System(SystemMessage::RegisterModule(Module::Multiplier(multiplier_mod)));
+        queue.send(msg).unwrap();
         id
     }
 }
@@ -143,11 +152,18 @@ pub(crate) fn collatz(n: Num) -> usize {
     // Create the queue and two modules:
     let (tx, rx): (Sender<Message>, Receiver<Message>) = unbounded();
     let divider = DividerModule::create(tx.clone());
+    println!("divider module created with id {divider:?}");
     let multiplier = MultiplierModule::create(n, tx.clone());
+    println!("multiplier module created with id {multiplier:?}");
 
-    // Initialize the modules by sending `Init` messages:
-    unimplemented!();
+    // // Initialize the modules by sending `Init` messages:
+    // unimplemented!();
+    let init_divider_msg = Message::ToModule(divider, ModuleMessage::Init { other: multiplier });
+    tx.send(init_divider_msg).unwrap();
+    let init_multiplier_msg = Message::ToModule(divider, ModuleMessage::Init { other: multiplier });
+    tx.send(init_multiplier_msg).unwrap();
 
-    // Run the executor:
-    run_executor(rx).join().unwrap().unwrap()
+    // // Run the executor:
+    // run_executor(rx).join().unwrap().unwrap()
+    1
 }
