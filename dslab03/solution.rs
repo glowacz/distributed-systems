@@ -142,6 +142,9 @@ impl MessageHandler for MultiplierModule {
     fn init(&mut self, other: Ident) {
         self.other = Some(other);
         println!("Initializing Multiplier Module, its id is {:?}, other's id is {:?}", self.id, self.other);
+        let compute_step_msg = ModuleMessage::ComputeStep { idx: 1, num: self.num };
+        let first_compute_step_whole_msg = Message::ToModule(self.id, compute_step_msg);
+        self.queue.send(first_compute_step_whole_msg).unwrap();
     }
 }
 
@@ -218,12 +221,13 @@ pub(crate) fn collatz(n: Num) -> usize {
     let init_multiplier_msg = Message::ToModule(multiplier, ModuleMessage::Init { other: divider });
     tx.send(init_multiplier_msg).unwrap();
 
-    let compute_step_msg = ModuleMessage::ComputeStep { idx: 1, num: n };
-    let first_compute_step_whole_msg = match n.is_multiple_of(2) {
-        true => Message::ToModule(divider, compute_step_msg),
-        false => Message::ToModule(multiplier, compute_step_msg)
-    };
-    tx.send(first_compute_step_whole_msg).unwrap();
+    // let compute_step_msg = ModuleMessage::ComputeStep { idx: 1, num: n };
+    // let first_compute_step_whole_msg = match n.is_multiple_of(2) {
+    //     true => Message::ToModule(divider, compute_step_msg),
+    //     false => Message::ToModule(multiplier, compute_step_msg)
+    // };
+    // tx.send(first_compute_step_whole_msg).unwrap();
+    
     // Run the executor:
     run_executor(rx).join().unwrap().unwrap()
 }
