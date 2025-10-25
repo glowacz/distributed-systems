@@ -7,6 +7,7 @@ use crate::definitions::{
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::thread;
 use std::thread::JoinHandle;
+use std::collections::HashMap;
 
 /// Structure representing a Divider module.
 ///
@@ -80,7 +81,7 @@ impl MessageHandler for DividerModule {
     /// The module finishes its initialization.
     fn init(&mut self, other: Ident) {
         self.other = Some(other);
-        println!("Initializing Divider Module, its id is {:?}", self.id)
+        println!("Initializing Divider Module, its id is {:?}, other's id is {:?}", self.id, self.other);
         // unimplemented!("Process");
     }
 }
@@ -118,7 +119,8 @@ impl MessageHandler for MultiplierModule {
     /// The module finishes its initialization and starts the computation
     /// by sending a message.
     fn init(&mut self, other: Ident) {
-        unimplemented!("Process");
+        self.other = Some(other);
+        println!("Initializing Multiplier Module, its id is {:?}, other's id is {:?}", self.id, self.other);
     }
 }
 
@@ -133,10 +135,40 @@ impl MessageHandler for MultiplierModule {
 /// The system returns the value found in the `Exit` message
 /// or `None` if there are no more messages to process.
 pub(crate) fn run_executor(rx: Receiver<Message>) -> JoinHandle<Option<usize>> {
-    unimplemented!();
+    // unimplemented!();
     thread::spawn(move || {
+        let mut modules = HashMap::<Ident, Module>::new();
         while let Ok(msg) = rx.recv() {
-            unimplemented!("Handle");
+            // unimplemented!("Handle");
+            match msg {
+                Message::System(msg) => {
+                    println!("Received system message {msg:?}");
+                    match msg {
+                        SystemMessage::RegisterModule(module) => {
+                            let id = module.get_id();
+                            println!("Module {module:?} registered in the executor");
+                            modules.insert(id, module);
+                        },
+                        SystemMessage::Exit(n_steps) => {
+                            println!("Exiting the system\nTook {n_steps} steps");
+                            return Some(n_steps);
+                        },
+                    }
+                },
+                Message::ToModule(id, msg) => {
+                    println!("Received message {msg:?} to module {id:?}");
+                    match msg {
+                        ModuleMessage::Init{ other } => {
+                            // let mut module: &mut Module = modules.get_mut(&id).unwrap();
+                            let module: &mut Module = modules.get_mut(&id).unwrap();
+                            module.init(other);
+                        },
+                        ModuleMessage::ComputeStep { idx, num } => {
+                            println!("[executor] compute step");
+                        }
+                    }
+                }
+            }
         }
         // No more messages in the system
         None
@@ -157,13 +189,11 @@ pub(crate) fn collatz(n: Num) -> usize {
     println!("multiplier module created with id {multiplier:?}");
 
     // // Initialize the modules by sending `Init` messages:
-    // unimplemented!();
     let init_divider_msg = Message::ToModule(divider, ModuleMessage::Init { other: multiplier });
     tx.send(init_divider_msg).unwrap();
-    let init_multiplier_msg = Message::ToModule(divider, ModuleMessage::Init { other: multiplier });
+    let init_multiplier_msg = Message::ToModule(multiplier, ModuleMessage::Init { other: divider });
     tx.send(init_multiplier_msg).unwrap();
 
-    // // Run the executor:
-    // run_executor(rx).join().unwrap().unwrap()
-    1
+    // Run the executor:
+    run_executor(rx).join().unwrap().unwrap()
 }
