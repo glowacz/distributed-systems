@@ -72,8 +72,16 @@ impl MessageHandler for DividerModule {
     /// rather than recursively invoking methods of the module.
     fn compute_step(&mut self, idx: usize, num: Num) {
         assert!(num.is_multiple_of(2));
+                
+        let new_num = num / 2;
+        let compute_step_msg = ModuleMessage::ComputeStep { idx: idx + 1, num: new_num };
+        let other = self.other.expect("This module ({self.id}) had no `other` registered");
+        let msg = match new_num.is_multiple_of(2) {
+            true => Message::ToModule(self.id, compute_step_msg),
+            false => Message::ToModule(other, compute_step_msg)
+        };
 
-        unimplemented!("Process");
+        self.queue.send(msg).unwrap();
     }
 
     /// Handle the init message.
@@ -82,7 +90,6 @@ impl MessageHandler for DividerModule {
     fn init(&mut self, other: Ident) {
         self.other = Some(other);
         println!("Initializing Divider Module, its id is {:?}, other's id is {:?}", self.id, self.other);
-        // unimplemented!("Process");
     }
 }
 
@@ -111,7 +118,21 @@ impl MessageHandler for MultiplierModule {
     /// rather than recursively invoking methods of the module.
     fn compute_step(&mut self, idx: usize, num: Num) {
         assert!(!num.is_multiple_of(2));
-        unimplemented!("Process");
+
+        if num == 1 {
+            let msg = Message::System(SystemMessage::Exit(idx));
+            self.queue.send(msg).unwrap();
+        }
+        
+        let new_num = 3 * num + 1;
+        let compute_step_msg = ModuleMessage::ComputeStep { idx: idx + 1, num: new_num };
+        let other = self.other.expect("This module ({self.id}) had no `other` registered");
+        let msg = match new_num.is_multiple_of(2) {
+            true => Message::ToModule(other, compute_step_msg),
+            false => Message::ToModule(self.id, compute_step_msg)
+        };
+        
+        self.queue.send(msg).unwrap();
     }
 
     /// Handle the init message.
@@ -150,13 +171,14 @@ pub(crate) fn run_executor(rx: Receiver<Message>) -> JoinHandle<Option<usize>> {
                             modules.insert(id, module);
                         },
                         SystemMessage::Exit(n_steps) => {
-                            println!("Exiting the system\nTook {n_steps} steps");
+                            // println!("Exiting the system\nTook {n_steps} steps");
+                            println!("Exiting the system");
                             return Some(n_steps);
                         },
                     }
                 },
                 Message::ToModule(id, msg) => {
-                    println!("Received message {msg:?} to module {id:?}");
+                    // println!("Received message {msg:?} to module {id:?}");
                     match msg {
                         ModuleMessage::Init{ other } => {
                             // let mut module: &mut Module = modules.get_mut(&id).unwrap();
@@ -164,7 +186,9 @@ pub(crate) fn run_executor(rx: Receiver<Message>) -> JoinHandle<Option<usize>> {
                             module.init(other);
                         },
                         ModuleMessage::ComputeStep { idx, num } => {
-                            println!("[executor] compute step");
+                            let module = modules.get_mut(&id).unwrap();
+                            module.compute_step(idx, num);
+                            // println!("[executor] compute step number {idx}; current num {num}");
                         }
                     }
                 }
@@ -194,6 +218,12 @@ pub(crate) fn collatz(n: Num) -> usize {
     let init_multiplier_msg = Message::ToModule(multiplier, ModuleMessage::Init { other: divider });
     tx.send(init_multiplier_msg).unwrap();
 
+    let compute_step_msg = ModuleMessage::ComputeStep { idx: 1, num: n };
+    let first_compute_step_whole_msg = match n.is_multiple_of(2) {
+        true => Message::ToModule(divider, compute_step_msg),
+        false => Message::ToModule(multiplier, compute_step_msg)
+    };
+    tx.send(first_compute_step_whole_msg).unwrap();
     // Run the executor:
     run_executor(rx).join().unwrap().unwrap()
 }
