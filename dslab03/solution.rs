@@ -89,7 +89,6 @@ impl MessageHandler for DividerModule {
     /// The module finishes its initialization.
     fn init(&mut self, other: Ident) {
         self.other = Some(other);
-        println!("Initializing Divider Module, its id is {:?}, other's id is {:?}", self.id, self.other);
     }
 }
 
@@ -141,7 +140,6 @@ impl MessageHandler for MultiplierModule {
     /// by sending a message.
     fn init(&mut self, other: Ident) {
         self.other = Some(other);
-        println!("Initializing Multiplier Module, its id is {:?}, other's id is {:?}", self.id, self.other);
         let compute_step_msg = ModuleMessage::ComputeStep { idx: 1, num: self.num };
         let first_compute_step_whole_msg = Message::ToModule(self.id, compute_step_msg);
         self.queue.send(first_compute_step_whole_msg).unwrap();
@@ -166,16 +164,12 @@ pub(crate) fn run_executor(rx: Receiver<Message>) -> JoinHandle<Option<usize>> {
             // unimplemented!("Handle");
             match msg {
                 Message::System(msg) => {
-                    println!("Received system message {msg:?}");
                     match msg {
                         SystemMessage::RegisterModule(module) => {
                             let id = module.get_id();
-                            println!("Module {module:?} registered in the executor");
                             modules.insert(id, module);
                         },
                         SystemMessage::Exit(n_steps) => {
-                            // println!("Exiting the system\nTook {n_steps} steps");
-                            println!("Exiting the system");
                             return Some(n_steps);
                         },
                     }
