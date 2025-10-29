@@ -121,6 +121,7 @@ impl MessageHandler for MultiplierModule {
         if num == 1 {
             let msg = Message::System(SystemMessage::Exit(idx));
             self.queue.send(msg).unwrap();
+            return;
         }
         
         let new_num = 3 * num + 1;
