@@ -39,6 +39,8 @@ async fn example_1() {
 #[tokio::main]
 async fn example_2() {
     let urls = vec![
+        "https://http.dog/200.jpg",
+        "https://picsum.photos/4200/5600",
         "https://google.com",
         "https://duckduckgo.com",
         "https://www.bing.com",
@@ -68,6 +70,9 @@ async fn example_2() {
         responses.push(
             // ...when the task is completed:
             task.await.unwrap(),
+            // I think we do that well after a task is completed
+            // since we await a task only when we already awaited previous ones
+            // but I guess you could poll this or sth
         );
     }
 
@@ -75,8 +80,23 @@ async fn example_2() {
     println!("{responses:#?}");
 }
 
+#[tokio::main]
+async fn example_my() {
+    let client = reqwest::Client::new();
+
+    for _ in 1..100 {
+        let client_clone = client.clone();
+
+        tokio::spawn(async move {
+            client_clone.get("https://picsum.photos/4200/5600").send().await.unwrap();
+        }).await.unwrap(); // this is a bad example, no real asynchrony here
+        // since we want to await each task before spawning the next
+    }
+}
 // The examples require an Internet access to work:
 fn main() {
-    example_1();
-    example_2();
+    // example_1();
+    // example_2();
+
+    example_my();
 }
