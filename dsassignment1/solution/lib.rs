@@ -1,4 +1,6 @@
-use tokio::time::Duration;
+use std::{collections::VecDeque, sync::Arc};
+use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}}, time::Duration};
+use async_trait::async_trait;
 
 pub trait Message: Send + 'static {}
 impl<T: Send + 'static> Message for T {}
@@ -12,6 +14,28 @@ pub trait Handler<M: Message>: Module {
     /// Handles the message.
     async fn handle(&mut self, msg: M);
 }
+
+#[async_trait]
+trait ErasedMessage<T: Module>: Send + 'static {
+    /// The type-erased handle call.
+    async fn handle(self: Box<Self>, module: &mut T);
+}
+
+/// Implementation of the type-erasure trait.
+/// This implementation allows any `M` that `T` can handle
+/// to be boxed into a `Box<dyn ErasedMessage<T>>`.
+#[async_trait]
+impl<M: Message, T: Module + Handler<M>> ErasedMessage<T> for M {
+    async fn handle(self: Box<Self>, module: &mut T) {
+        // This calls the *specific* T::handle(M) implementation.
+        T::handle(module, *self).await;
+    }
+}
+
+type MySender<T> = UnboundedSender<Box<dyn ErasedMessage<T> + Send>>;
+
+// The type for your receiver
+type MyReceiver<T> = UnboundedReceiver<Box<dyn ErasedMessage<T> + Send>>;
 
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
@@ -41,39 +65,44 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
-        unimplemented!()
+        let (msg_tx, mut msg_rx): (MySender<T>, MyReceiver<T>) = unbounded_channel();
+        let module_ref = ModuleRef {
+            msg_tx,
+        };
+        let mut module = module_constructor(module_ref.clone());
+        // module_ref.module = Some(module);
+        tokio::spawn(async move {
+            loop {
+                let msg = msg_rx.recv().await.unwrap();
+                msg.handle(&mut module).await;
+            }
+        });
+        println!("Module registered");
+        module_ref
     }
 
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
-        unimplemented!()
+        // unimplemented!()
+        System {}
     }
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        unimplemented!()
+        // unimplemented!()
     }
 }
 
 /// A reference to a module used for sending messages.
 // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
 #[non_exhaustive]
+// #[derive(Clone)]
 pub struct ModuleRef<T: Module>
 where
     Self: Send, // As T is Send, with this line we easily SemVer-promise ModuleRef is Send.
 {
-    // If the structure doesn't use `T` in any field, a marker field is required.
-    // **It can be removed if type `T` is used in some other field.**
-    //
-    // A marker field is required to inform the compiler how properties
-    // of this structure are related to properties of `T`
-    // (i.e., the struct behaves "as it would contain ...").
-    // For instance, the semantics would change if we held `&mut T` instead of `T`,
-    // therefore, we need to specify variance in `T`.
-    // Furthermore, the marker provides auto-trait and drop check resolution in regard to `T`.
-    // Typically, `PhantomData<T>` is used, but we don't want to propagate all auto-traits of `T`.
-    // We use the standard pattern to make our struct Send/Sync independent of `T`, but covariant.
-    _marker: std::marker::PhantomData<fn() -> T>,
+    // msg_tx: UnboundedSender<Box<dyn ErasedMessage<T>>>,
+    msg_tx: MySender<T>,
 }
 
 impl<T: Module> ModuleRef<T> {
@@ -82,7 +111,9 @@ impl<T: Module> ModuleRef<T> {
     where
         T: Handler<M>,
     {
-        unimplemented!()
+        // unimplemented!()
+        let erased_msg: Box<dyn ErasedMessage<T>> = Box::new(msg);
+        self.msg_tx.send(erased_msg).unwrap();
     }
 
     /// Schedules a message to be sent to the module periodically with the given interval.
@@ -103,6 +134,9 @@ impl<T: Module> ModuleRef<T> {
 impl<T: Module> Clone for ModuleRef<T> {
     /// Creates a new reference to the same module.
     fn clone(&self) -> Self {
-        unimplemented!()
+        // unimplemented!()
+        ModuleRef { 
+            msg_tx: self.msg_tx.clone()
+        }
     }
 }
