@@ -33,18 +33,19 @@ type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T> + Sen
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
 pub struct TimerHandle {
-    stop_tx: watch::Sender<bool>
+    tick_stop_tx: watch::Sender<bool>
 }
 
 impl TimerHandle {
     pub fn is_closed(&self) -> bool {
-        self.stop_tx.is_closed()
+        self.tick_stop_tx.is_closed()
     }
     /// Stops the sending of ticks resulting from the corresponding call to `ModuleRef::request_tick()`.
     /// If the ticks are already stopped, does nothing.
     pub async fn stop(&self) {
         // self.task.clone().join();
-        self.stop_tx.send(true).unwrap();
+        println!("Sending stop message to this tick task\n==============================\n");
+        self.tick_stop_tx.send(true).unwrap();
         // it would be weird if stop_rx got dropped as it should just run inside a loop in a task
         // but maybe worth checking
     }
@@ -76,11 +77,11 @@ impl System {
         // this way we avoid the problem of unbounded channels (from docs):
         // "the process to run out of memory. In this case, the process will be aborted."
         let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = channel(64);
-        let (stop_tx, _stop_rx) = watch::channel(false);
-        self.stop_txs.push(stop_tx.clone());
+        let (stop_all_ticks_tx, _stop_rx) = watch::channel(false);
+        self.stop_txs.push(stop_all_ticks_tx.clone());
         let module_ref = ModuleRef {
             msg_tx,
-            stop_tx
+            stop_all_ticks_tx
         };
         let mut module = module_constructor(module_ref.clone());
         self.tasks.spawn(async move {
@@ -133,9 +134,11 @@ impl System {
         self.shutdown_tx.send(true).unwrap();
         // println!("Shutdown sent");
         // tokio::time::sleep(Duration::from_millis(200)).await;
+
         for stop_tx in self.stop_txs.clone() {
             stop_tx.send(true).unwrap_or_default();
         }
+
         while self.tasks.join_next().await.is_some() {
             // println!("Joined some task");
         }
@@ -153,7 +156,7 @@ where
 {
     // msg_tx: UnboundedSender<Box<dyn Handlee<T>>>,
     msg_tx: SenderForModule<T>,
-    stop_tx: watch::Sender<bool>
+    stop_all_ticks_tx: watch::Sender<bool>,
 }
 
 impl<T: Module> ModuleRef<T> {
@@ -179,35 +182,47 @@ impl<T: Module> ModuleRef<T> {
         // tokio task can outlive this ModuleRef (self), so we have to clone it
         // let self_ref = self.clone();
         let msg_tx = self.msg_tx.clone();
-        let (stop_tx, mut stop_rx) = watch::channel(false);
-        let mut global_stop_rx = self.stop_tx.subscribe();
+        let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
+        let mut global_stop_rx = self.stop_all_ticks_tx.subscribe();
 
         let _task = tokio::spawn(async move {
             let mut interval = time::interval(delay);
             // awaiting the first, immediate tick
             interval.tick().await;
             loop {
-                // println!("[request_tick]: before tick");
-                interval.tick().await;
+                // println!("[tick task]: before select");
+                // interval.tick().await;
                 // println!("[request_tick]: after tick");
 
                 tokio::select! {
                     biased;
-                    
+
                     _ = interval.tick() => {
+                        // println!("[tick task]: received tick");
                         let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
                         let _res = msg_tx.send(boxed_msg).await;
                         // println!("result of sending: {:?}", res);
                     }
 
-                    _ = stop_rx.changed() => {
+                    _ = global_stop_rx.changed() => {
+                        // println!("Tick task received shutdown, ending it");
                         break;
                     }
 
-                    _ = global_stop_rx.changed() => {
-                        break;
+                    changed = tick_stop_rx.changed() => {
+                        // don't break if (all) the sender(s) got dropped;
+                        // this is normal as somebody might call request_tick 
+                        // and not store the result, resulting in the returned TimerHandle
+                        // being immediately dropped
+                        if !changed.is_err() {
+                            break;
+                            // println!("Tick task received stop message, ending it");
+                        }
+                        // println!("TimerHandle dropped, but the ticks will tick until shutdown");
                     }
                 }
+
+                // println!("[tick task]: after select");
 
                 // checking if we got sent "true" in this channel, which means cancel those ticks;
                 // if the sender was dropped (the TimerHandle returned from this request_tick was dropped),
@@ -224,10 +239,11 @@ impl<T: Module> ModuleRef<T> {
                 // let res = msg_tx.send(boxed_msg).await;
                 // println!("result of sending: {:?}", res);
             }
+            // println!("Tick task: after loop");
         });
 
         TimerHandle {
-            stop_tx
+            tick_stop_tx
         }
     }
 }
@@ -240,7 +256,7 @@ impl<T: Module> Clone for ModuleRef<T> {
         // unimplemented!()
         ModuleRef { 
             msg_tx: self.msg_tx.clone(),
-            stop_tx: self.stop_tx.clone()
+            stop_all_ticks_tx: self.stop_all_ticks_tx.clone()
         }
     }
 }
