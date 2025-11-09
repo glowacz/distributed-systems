@@ -18,6 +18,7 @@ struct Timer {
 
 impl Timer {
     fn new(timeout_callback: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+        println!("Registering Timer module (calling the new function)");
         Self {
             first_tick_received: false,
             timeout_callback: Some(timeout_callback),
@@ -28,6 +29,7 @@ impl Timer {
 #[async_trait::async_trait]
 impl Handler<Tick> for Timer {
     async fn handle(&mut self, _msg: Tick) {
+        println!("Handling tick");
         if !self.first_tick_received {
             self.first_tick_received = true;
         } else if let Some(callback) = self.timeout_callback.take() {
@@ -42,11 +44,16 @@ async fn set_timer(
     timeout_callback: Pin<Box<dyn Future<Output = ()> + Send>>,
     duration: Duration,
 ) -> ModuleRef<Timer> {
+// ) -> (ModuleRef<Timer>, TimerHandle) {
     let timer = system
         .register_module(|_| Timer::new(timeout_callback))
         .await;
+    // let thandle = timer.request_tick(Tick, duration).await;
     timer.request_tick(Tick, duration).await;
+    // println!("is stop_tx closed? {}", thandle.is_closed());
+    // println!("Tick requested");
     timer
+    // (timer, thandle)
 }
 
 /// Token sent by the backdoor callback.
@@ -76,6 +83,34 @@ async fn second_tick_arrives_after_correct_interval() {
     assert!((elapsed.as_millis() as i128 - (timeout_interval.as_millis() * 2) as i128).abs() <= 2);
     sys.shutdown().await;
 }
+
+/// CUSTOM (PRINTS)
+// #[allow(clippy::cast_possible_wrap)]
+// async fn second_tick_arrives_after_correct_interval() {
+//     let mut sys = System::new().await;
+//     let (timeout_sender, mut timeout_receiver) = unbounded_channel::<Timeout>();
+//     let timeout_interval = Duration::from_millis(50);
+
+//     let start_instant = Instant::now();
+//     set_timer(
+//     // let (_timer_ref, thandle) = set_timer(
+//         &mut sys,
+//         Box::pin(async move {
+//             timeout_sender.send(Timeout).unwrap();
+//         }),
+//         timeout_interval,
+//     )
+//     .await;
+//     // println!("is stop_tx closed? {}", thandle.is_closed());
+//     println!("set_timer finished");
+//     timeout_receiver.recv().await.unwrap();
+//     let elapsed = start_instant.elapsed();
+
+//     // Note: this bound may be too strict for some implementations,
+//     // but it likely indicates congestion.
+//     assert!((elapsed.as_millis() as i128 - (timeout_interval.as_millis() * 2) as i128).abs() <= 2);
+//     sys.shutdown().await;
+// }
 
 // Run the module under various tokio runtimes.
 

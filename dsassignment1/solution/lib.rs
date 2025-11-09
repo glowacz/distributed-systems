@@ -39,11 +39,16 @@ pub struct TimerHandle {
 }
 
 impl TimerHandle {
+    pub fn is_closed(&self) -> bool {
+        self.stop_tx.is_closed()
+    }
     /// Stops the sending of ticks resulting from the corresponding call to `ModuleRef::request_tick()`.
     /// If the ticks are already stopped, does nothing.
     pub async fn stop(&self) {
         // self.task.clone().join();
         self.stop_tx.send(true).unwrap();
+        // it would be weird if stop_rx got dropped as it should just run inside a loop in a task
+        // but maybe worth checking
     }
 }
 
@@ -83,8 +88,14 @@ impl System {
                     // here, the msg_rx should get dropped; so we should handle that where we use msg_tx.send() (in ModuleRef::send)
                     // also, the module should get dropped which is what the task description says
                 }
-                let msg = msg_rx.recv().await.unwrap();
-                msg.get_handled(&mut module).await;
+                let msg_opt = msg_rx.recv().await;
+                
+                if let Some(msg) = msg_opt {
+                    msg.get_handled(&mut module).await;
+                }
+                else {
+                    break;
+                }
             }
         });
         // println!("Module registered");
@@ -153,7 +164,11 @@ impl<T: Module> ModuleRef<T> {
                 interval.tick().await;
                 // println!("[request_tick]: after tick");
 
-                let stop = stop_rx.has_changed().unwrap();
+                // checking if we got sent "true" in this channel, which means cancel those ticks;
+                // if the sender was dropped (the TimerHandle returned from this request_tick was dropped),
+                // then we shouldn't stop
+                // probably should think about graceful shutdown though
+                let stop = stop_rx.has_changed().unwrap_or(false);
                 if stop {
                     // println!("Stopping ticks, won't send a message for this tick even though we awaited it");
                     // println!("Because the stopping request probably came during awaiting this tick");
