@@ -1,5 +1,5 @@
 use std::{collections::VecDeque, sync::Arc};
-use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, watch}, time::Duration};
+use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, channel, unbounded_channel}, watch}, time::Duration};
 use async_trait::async_trait;
 
 pub trait Message: Send + 'static {}
@@ -27,8 +27,8 @@ impl<M: Message, T: Handler<M>> Handlee<T> for M {
     }
 }
 
-type SenderForModule<T> = UnboundedSender<Box<dyn Handlee<T> + Send>>;
-type ReceiverForModule<T> = UnboundedReceiver<Box<dyn Handlee<T> + Send>>;
+type SenderForModule<T> = tokio::sync::mpsc::Sender<Box<dyn Handlee<T> + Send>>;
+type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T> + Send>>;
 
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
@@ -61,7 +61,13 @@ impl System {
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
         let shutdown_rx = self.shutdown_rx.clone();
-        let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = unbounded_channel();
+        // creating normal (bounded) channel for messages to apply backpressure:
+        // if someone tried to send too many messages at once to the module, 
+        // at some point they would have to wait for the send operation to complete
+        // as some message would have to be read from the channel for the send operation to complete
+        // this way we avoid the problem of unbounded channels (from docs):
+        // "the process to run out of memory. In this case, the process will be aborted."
+        let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = channel(64);
         let module_ref = ModuleRef {
             msg_tx,
         };
@@ -118,7 +124,7 @@ impl<T: Module> ModuleRef<T> {
     {
         // unimplemented!()
         let erased_msg: Box<dyn Handlee<T>> = Box::new(msg);
-        self.msg_tx.send(erased_msg).unwrap();
+        let _ = self.msg_tx.send(erased_msg).await;
     }
 
     /// Schedules a message to be sent to the module periodically with the given interval.
