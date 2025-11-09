@@ -16,26 +16,19 @@ pub trait Handler<M: Message>: Module {
 }
 
 #[async_trait]
-trait ErasedMessage<T: Module>: Send + 'static {
-    /// The type-erased handle call.
-    async fn handle(self: Box<Self>, module: &mut T);
+trait Handlee<T: Module>: Message {
+    async fn get_handled(self: Box<Self>, module: &mut T);
 }
 
-/// Implementation of the type-erasure trait.
-/// This implementation allows any `M` that `T` can handle
-/// to be boxed into a `Box<dyn ErasedMessage<T>>`.
 #[async_trait]
-impl<M: Message, T: Module + Handler<M>> ErasedMessage<T> for M {
-    async fn handle(self: Box<Self>, module: &mut T) {
-        // This calls the *specific* T::handle(M) implementation.
-        T::handle(module, *self).await;
+impl<M: Message, T: Handler<M>> Handlee<T> for M {
+    async fn get_handled(self: Box<Self>, module: &mut T) {
+        module.handle(*self).await;
     }
 }
 
-type MySender<T> = UnboundedSender<Box<dyn ErasedMessage<T> + Send>>;
-
-// The type for your receiver
-type MyReceiver<T> = UnboundedReceiver<Box<dyn ErasedMessage<T> + Send>>;
+type SenderForModule<T> = UnboundedSender<Box<dyn Handlee<T> + Send>>;
+type ReceiverForModule<T> = UnboundedReceiver<Box<dyn Handlee<T> + Send>>;
 
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
@@ -65,7 +58,7 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
-        let (msg_tx, mut msg_rx): (MySender<T>, MyReceiver<T>) = unbounded_channel();
+        let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = unbounded_channel();
         let module_ref = ModuleRef {
             msg_tx,
         };
@@ -74,7 +67,7 @@ impl System {
         tokio::spawn(async move {
             loop {
                 let msg = msg_rx.recv().await.unwrap();
-                msg.handle(&mut module).await;
+                msg.get_handled(&mut module).await;
             }
         });
         println!("Module registered");
@@ -101,8 +94,8 @@ pub struct ModuleRef<T: Module>
 where
     Self: Send, // As T is Send, with this line we easily SemVer-promise ModuleRef is Send.
 {
-    // msg_tx: UnboundedSender<Box<dyn ErasedMessage<T>>>,
-    msg_tx: MySender<T>,
+    // msg_tx: UnboundedSender<Box<dyn Handlee<T>>>,
+    msg_tx: SenderForModule<T>,
 }
 
 impl<T: Module> ModuleRef<T> {
@@ -112,7 +105,7 @@ impl<T: Module> ModuleRef<T> {
         T: Handler<M>,
     {
         // unimplemented!()
-        let erased_msg: Box<dyn ErasedMessage<T>> = Box::new(msg);
+        let erased_msg: Box<dyn Handlee<T>> = Box::new(msg);
         self.msg_tx.send(erased_msg).unwrap();
     }
 
