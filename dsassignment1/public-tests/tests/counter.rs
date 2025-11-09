@@ -12,6 +12,8 @@ struct CountToFive {
 #[async_trait::async_trait]
 impl Handler<u8> for CountToFive {
     async fn handle(&mut self, msg: u8) {
+        println!("Handling {}", msg);
+        tokio::time::sleep(Duration::from_nanos(1)).await;
         if msg == 5 {
             self.five_sender.send(msg).unwrap();
         } else {
@@ -31,9 +33,8 @@ async fn self_ref_works() {
             five_sender,
         })
         .await;
-
+    // comment sleep in CountToFive module for running this test
     count_to_five.send(1).await;
-
     assert_eq!(five_receiver.recv().await.unwrap(), 5);
 
     system.shutdown().await;
@@ -79,5 +80,22 @@ async fn stopping_ticks_works() {
     }
     assert_eq!(received_numbers, vec![0, 1, 2]);
 
+    system.shutdown().await;
+}
+
+#[tokio::test]
+#[timeout(300)]
+async fn unexpected_shutdown_works() {
+    let mut system = System::new().await;
+    let (five_sender, mut five_receiver) = unbounded_channel::<u8>();
+    let count_to_five = system
+        .register_module(|self_ref| CountToFive {
+            self_ref,
+            five_sender,
+        })
+        .await;
+    // uncomment sleep in CountToFive module for running this test
+    count_to_five.send(1).await;
+    tokio::time::sleep(Duration::from_micros(1000)).await;
     system.shutdown().await;
 }

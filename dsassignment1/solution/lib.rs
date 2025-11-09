@@ -1,5 +1,5 @@
 use std::{collections::VecDeque, sync::Arc};
-use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}}, time::Duration};
+use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, watch}, time::Duration};
 use async_trait::async_trait;
 
 pub trait Message: Send + 'static {}
@@ -47,6 +47,8 @@ impl TimerHandle {
 #[non_exhaustive]
 pub struct System {
     // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>
 }
 
 impl System {
@@ -58,14 +60,20 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
+        let shutdown_rx = self.shutdown_rx.clone();
         let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = unbounded_channel();
         let module_ref = ModuleRef {
             msg_tx,
         };
         let mut module = module_constructor(module_ref.clone());
-        // module_ref.module = Some(module);
         tokio::spawn(async move {
             loop {
+                let shutdown = shutdown_rx.has_changed().unwrap();
+                if shutdown {
+                    break;
+                    // here, the msg_rx should get dropped; so we should handle that where we use msg_tx.send() (in ModuleRef::send)
+                    // also, the module should get dropped which is what the task description says
+                }
                 let msg = msg_rx.recv().await.unwrap();
                 msg.get_handled(&mut module).await;
             }
@@ -77,12 +85,16 @@ impl System {
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
         // unimplemented!()
-        System {}
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        System {
+            shutdown_tx,
+            shutdown_rx
+        }
     }
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        // unimplemented!()
+        self.shutdown_tx.send(true).unwrap();
     }
 }
 
