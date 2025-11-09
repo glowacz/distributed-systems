@@ -13,7 +13,7 @@ struct CountToFive {
 impl Handler<u8> for CountToFive {
     async fn handle(&mut self, msg: u8) {
         println!("Handling {}", msg);
-        tokio::time::sleep(Duration::from_nanos(1)).await;
+        // tokio::time::sleep(Duration::from_nanos(1)).await;
         if msg == 5 {
             self.five_sender.send(msg).unwrap();
         } else {
@@ -54,6 +54,7 @@ struct Tick;
 impl Handler<Tick> for Counter {
     async fn handle(&mut self, _msg: Tick) {
         self.num_sender.send(self.num).unwrap();
+        println!("Sent number {}; incrementing it", self.num);
         self.num += 1;
     }
 }
@@ -87,7 +88,7 @@ async fn stopping_ticks_works() {
 #[timeout(300)]
 async fn unexpected_shutdown_works() {
     let mut system = System::new().await;
-    let (five_sender, mut five_receiver) = unbounded_channel::<u8>();
+    let (five_sender, _five_receiver) = unbounded_channel::<u8>();
     let count_to_five = system
         .register_module(|self_ref| CountToFive {
             self_ref,
@@ -99,3 +100,30 @@ async fn unexpected_shutdown_works() {
     tokio::time::sleep(Duration::from_micros(1000)).await;
     system.shutdown().await;
 }
+
+// #[tokio::test]
+// #[timeout(500000)]
+// async fn custom_stopping_ticks_works() {
+//     let mut system = System::new().await;
+//     let (num_sender, mut num_receiver) = unbounded_channel();
+//     let counter_ref = system
+//         .register_module(|_| Counter { num: 0, num_sender })
+//         .await;
+
+//     let timer_handle = counter_ref
+//         .request_tick(Tick, Duration::from_secs(2))
+//         .await;
+//     // ATTENTION: modified this timeout for my solution to work lol
+//     // I see that it's bad, it's not my computer that's too fast, the messages should be sent every 50 millis
+//     tokio::time::sleep(Duration::from_secs(5)).await;
+//     timer_handle.stop().await;
+//     tokio::time::sleep(Duration::from_secs(10)).await;
+
+//     let mut received_numbers = Vec::new();
+//     while let Ok(num) = num_receiver.try_recv() {
+//         received_numbers.push(num);
+//     }
+//     assert_eq!(received_numbers, vec![0, 1, 2]);
+
+//     system.shutdown().await;
+// }

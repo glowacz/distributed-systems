@@ -1,5 +1,5 @@
-use std::{collections::VecDeque, sync::Arc};
-use tokio::{sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, channel, unbounded_channel}, watch}, time::Duration};
+// use std::{thread::JoinHandle};
+use tokio::{sync::{mpsc::{channel}, watch}, time::{self, Duration}};
 use async_trait::async_trait;
 
 pub trait Message: Send + 'static {}
@@ -34,21 +34,24 @@ type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T> + Sen
 #[non_exhaustive]
 pub struct TimerHandle {
     // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
+    // task: JoinHandle<()>
+    stop_tx: watch::Sender<bool>
 }
 
 impl TimerHandle {
     /// Stops the sending of ticks resulting from the corresponding call to `ModuleRef::request_tick()`.
     /// If the ticks are already stopped, does nothing.
     pub async fn stop(&self) {
-        unimplemented!()
+        // self.task.clone().join();
+        self.stop_tx.send(true).unwrap();
     }
 }
 
 #[non_exhaustive]
 pub struct System {
     // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
-    shutdown_tx: tokio::sync::watch::Sender<bool>,
-    shutdown_rx: tokio::sync::watch::Receiver<bool>
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>
 }
 
 impl System {
@@ -84,7 +87,7 @@ impl System {
                 msg.get_handled(&mut module).await;
             }
         });
-        println!("Module registered");
+        // println!("Module registered");
         module_ref
     }
 
@@ -123,8 +126,8 @@ impl<T: Module> ModuleRef<T> {
         T: Handler<M>,
     {
         // unimplemented!()
-        let erased_msg: Box<dyn Handlee<T>> = Box::new(msg);
-        let _ = self.msg_tx.send(erased_msg).await;
+        let boxed_msg: Box<dyn Handlee<T>> = Box::new(msg);
+        let _ = self.msg_tx.send(boxed_msg).await;
     }
 
     /// Schedules a message to be sent to the module periodically with the given interval.
@@ -136,8 +139,43 @@ impl<T: Module> ModuleRef<T> {
         M: Message + Clone,
         T: Handler<M>,
     {
-        unimplemented!()
+        // tokio task can outlive this ModuleRef (self), so we have to clone it
+        // let self_ref = self.clone();
+        let msg_tx = self.msg_tx.clone();
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        let _task = tokio::spawn(async move {
+            let mut interval = time::interval(delay);
+            // awaiting the first, immediate tick
+            interval.tick().await;
+            loop {
+                // println!("[request_tick]: before tick");
+                interval.tick().await;
+                // println!("[request_tick]: after tick");
+
+                let stop = stop_rx.has_changed().unwrap();
+                if stop {
+                    // println!("Stopping ticks, won't send a message for this tick even though we awaited it");
+                    // println!("Because the stopping request probably came during awaiting this tick");
+                    break;
+                }
+
+                let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
+                let _ = msg_tx.send(boxed_msg).await;
+            }
+        });
+
+        TimerHandle {
+            stop_tx
+        }
     }
+
+    // async fn handle_ticks<M: Message + Clone>(&self, message: M, delay: Duration) 
+    // where
+    //     T: Handler<M>
+    // {
+        
+    // }
 }
 
 // You may replace this with `#[derive(Clone)]` if you want.
