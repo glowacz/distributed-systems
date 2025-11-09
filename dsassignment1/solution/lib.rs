@@ -1,5 +1,5 @@
 // use std::{thread::JoinHandle};
-use tokio::{sync::{mpsc::{channel}, watch}, time::{self, Duration}};
+use tokio::{sync::{mpsc::channel, watch}, task::JoinSet, time::{self, Duration}};
 use async_trait::async_trait;
 
 pub trait Message: Send + 'static {}
@@ -33,8 +33,6 @@ type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T> + Sen
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
 pub struct TimerHandle {
-    // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
-    // task: JoinHandle<()>
     stop_tx: watch::Sender<bool>
 }
 
@@ -54,7 +52,7 @@ impl TimerHandle {
 
 #[non_exhaustive]
 pub struct System {
-    // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
+    tasks: JoinSet<()>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>
 }
@@ -68,7 +66,8 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
-        let shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        // let mut shutdown_rx = self.shutdown_tx.subscribe();
         // creating normal (bounded) channel for messages to apply backpressure:
         // if someone tried to send too many messages at once to the module, 
         // at some point they would have to wait for the send operation to complete
@@ -80,23 +79,31 @@ impl System {
             msg_tx,
         };
         let mut module = module_constructor(module_ref.clone());
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
+        // tokio::spawn(async move {
             loop {
-                let shutdown = shutdown_rx.has_changed().unwrap();
-                if shutdown {
-                    break;
-                    // here, the msg_rx should get dropped; so we should handle that where we use msg_tx.send() (in ModuleRef::send)
-                    // also, the module should get dropped which is what the task description says
-                }
-                let msg_opt = msg_rx.recv().await;
-                
-                if let Some(msg) = msg_opt {
-                    msg.get_handled(&mut module).await;
-                }
-                else {
-                    break;
+                tokio::select! {
+                    biased;
+
+                    _ = shutdown_rx.changed() => {
+                        // println!("Breaking loop because of shutdown");
+                        break;
+                    }
+
+                    msg_opt = msg_rx.recv() => {
+                        if let Some(msg) = msg_opt {
+                            // println!("Before handling message");
+                            msg.get_handled(&mut module).await;
+                            // println!("After handling message");
+                        }
+                        else {
+                            // println!("Breaking loop because there was some error receiving");
+                            break;
+                        }
+                    }
                 }
             }
+            // println!("After loop");
         });
         // println!("Module registered");
         module_ref
@@ -104,9 +111,11 @@ impl System {
 
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
-        // unimplemented!()
+        let tasks = JoinSet::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // let (shutdown_tx, _) = watch::channel(false);
         System {
+            tasks,
             shutdown_tx,
             shutdown_rx
         }
@@ -114,12 +123,19 @@ impl System {
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
+        // println!("Shutdown received");
+        // self.shutdown_tx.send(true).unwrap_or_default();
         self.shutdown_tx.send(true).unwrap();
+        // println!("Shutdown sent");
+        while self.tasks.join_next().await.is_some() {
+            // println!("Joined some task");
+        }
+        // self.tasks.join_all();
+        // println!("All tasks joined");
     }
 }
 
 /// A reference to a module used for sending messages.
-// You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
 #[non_exhaustive]
 // #[derive(Clone)]
 pub struct ModuleRef<T: Module>
@@ -176,7 +192,8 @@ impl<T: Module> ModuleRef<T> {
                 }
 
                 let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
-                let _ = msg_tx.send(boxed_msg).await;
+                let res = msg_tx.send(boxed_msg).await;
+                println!("result of sending: {:?}", res);
             }
         });
 
@@ -184,13 +201,6 @@ impl<T: Module> ModuleRef<T> {
             stop_tx
         }
     }
-
-    // async fn handle_ticks<M: Message + Clone>(&self, message: M, delay: Duration) 
-    // where
-    //     T: Handler<M>
-    // {
-        
-    // }
 }
 
 // You may replace this with `#[derive(Clone)]` if you want.
