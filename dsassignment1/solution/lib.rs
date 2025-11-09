@@ -54,7 +54,8 @@ impl TimerHandle {
 pub struct System {
     tasks: JoinSet<()>,
     shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>
+    shutdown_rx: watch::Receiver<bool>,
+    stop_txs: Vec<watch::Sender<bool>>
 }
 
 impl System {
@@ -75,8 +76,11 @@ impl System {
         // this way we avoid the problem of unbounded channels (from docs):
         // "the process to run out of memory. In this case, the process will be aborted."
         let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = channel(64);
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        self.stop_txs.push(stop_tx.clone());
         let module_ref = ModuleRef {
             msg_tx,
+            stop_tx
         };
         let mut module = module_constructor(module_ref.clone());
         self.tasks.spawn(async move {
@@ -117,7 +121,8 @@ impl System {
         System {
             tasks,
             shutdown_tx,
-            shutdown_rx
+            shutdown_rx,
+            stop_txs: vec![],
         }
     }
 
@@ -127,6 +132,10 @@ impl System {
         // self.shutdown_tx.send(true).unwrap_or_default();
         self.shutdown_tx.send(true).unwrap();
         // println!("Shutdown sent");
+        // tokio::time::sleep(Duration::from_millis(200)).await;
+        for stop_tx in self.stop_txs.clone() {
+            stop_tx.send(true).unwrap_or_default();
+        }
         while self.tasks.join_next().await.is_some() {
             // println!("Joined some task");
         }
@@ -144,6 +153,7 @@ where
 {
     // msg_tx: UnboundedSender<Box<dyn Handlee<T>>>,
     msg_tx: SenderForModule<T>,
+    stop_tx: watch::Sender<bool>
 }
 
 impl<T: Module> ModuleRef<T> {
@@ -169,7 +179,8 @@ impl<T: Module> ModuleRef<T> {
         // tokio task can outlive this ModuleRef (self), so we have to clone it
         // let self_ref = self.clone();
         let msg_tx = self.msg_tx.clone();
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let mut global_stop_rx = self.stop_tx.subscribe();
 
         let _task = tokio::spawn(async move {
             let mut interval = time::interval(delay);
@@ -180,20 +191,38 @@ impl<T: Module> ModuleRef<T> {
                 interval.tick().await;
                 // println!("[request_tick]: after tick");
 
+                tokio::select! {
+                    biased;
+                    
+                    _ = interval.tick() => {
+                        let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
+                        let _res = msg_tx.send(boxed_msg).await;
+                        // println!("result of sending: {:?}", res);
+                    }
+
+                    _ = stop_rx.changed() => {
+                        break;
+                    }
+
+                    _ = global_stop_rx.changed() => {
+                        break;
+                    }
+                }
+
                 // checking if we got sent "true" in this channel, which means cancel those ticks;
                 // if the sender was dropped (the TimerHandle returned from this request_tick was dropped),
                 // then we shouldn't stop
                 // probably should think about graceful shutdown though
-                let stop = stop_rx.has_changed().unwrap_or(false);
-                if stop {
-                    // println!("Stopping ticks, won't send a message for this tick even though we awaited it");
-                    // println!("Because the stopping request probably came during awaiting this tick");
-                    break;
-                }
+                // let stop = stop_rx.has_changed().unwrap_or(false);
+                // if stop {
+                //     // println!("Stopping ticks, won't send a message for this tick even though we awaited it");
+                //     // println!("Because the stopping request probably came during awaiting this tick");
+                //     break;
+                // }
 
-                let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
-                let res = msg_tx.send(boxed_msg).await;
-                println!("result of sending: {:?}", res);
+                // let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
+                // let res = msg_tx.send(boxed_msg).await;
+                // println!("result of sending: {:?}", res);
             }
         });
 
@@ -210,7 +239,8 @@ impl<T: Module> Clone for ModuleRef<T> {
     fn clone(&self) -> Self {
         // unimplemented!()
         ModuleRef { 
-            msg_tx: self.msg_tx.clone()
+            msg_tx: self.msg_tx.clone(),
+            stop_tx: self.stop_tx.clone()
         }
     }
 }
