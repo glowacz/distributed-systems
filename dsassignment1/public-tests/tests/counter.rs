@@ -1,7 +1,7 @@
-use assignment_1_solution::{Handler, ModuleRef, System};
+use assignment_1_solution::{Handler, ModuleRef, System, TimerHandle};
 use ntest::timeout;
-use std::time::Duration;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use std::{time::Duration, vec};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 struct CountToFive {
     self_ref: ModuleRef<Self>,
@@ -101,6 +101,55 @@ async fn unexpected_shutdown_works() {
     system.shutdown().await;
 }
 
+async fn create_multiple_timers(system: &mut System, n: u8) -> (Vec<TimerHandle>, UnboundedReceiver<u8>){
+    let mut timer_handles = vec![];
+
+    let (num_sender, num_receiver) = unbounded_channel();
+    let counter_ref = system
+    .register_module(|_| Counter { num: 0, num_sender })
+    .await;
+
+    for _ in 0..n {
+        let timer_handle = counter_ref
+            .request_tick(Tick, Duration::from_millis(50))
+            .await;
+
+        timer_handles.push(timer_handle);
+    }
+
+    (timer_handles, num_receiver)
+}
+
+#[tokio::test]
+#[timeout(500)]
+async fn stopping_some_ticks_works() {
+    let n: usize = 5;
+    let mut system = System::new().await;
+    let (timer_handles, mut num_receiver) = create_multiple_timers(&mut system, n as u8).await;
+    
+    tokio::time::sleep(Duration::from_millis(120)).await; 
+    // timer_handles[0].stop().await;
+    timer_handles[1].stop().await;
+    // timer_handles[2].stop().await;
+    timer_handles[3].stop().await;
+    timer_handles[4].stop().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut received_numbers: Vec<u8> = vec![];
+
+    for _i in 0..n {
+        while let Ok(num) = num_receiver.try_recv() {
+            received_numbers.push(num);
+        }
+    }
+    
+    // println!("Received numbers {:?}", received_numbers);
+
+    assert_eq!(received_numbers, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+
+    system.shutdown().await;
+}
+
 #[tokio::test]
 #[timeout(500)]
 async fn multiple_stopping_ticks_works() {
@@ -115,9 +164,10 @@ async fn multiple_stopping_ticks_works() {
         .await;
     tokio::time::sleep(Duration::from_millis(170)).await;
     timer_handle.stop().await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
     timer_handle.stop().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     timer_handle.stop().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut received_numbers = Vec::new();
     while let Ok(num) = num_receiver.try_recv() {

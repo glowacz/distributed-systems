@@ -207,14 +207,12 @@ async fn not_dropping_timer_handle() {
     let (_timer_ref, _timer_handle) = not_dropping_set_timer(
         &mut sys,
         Box::pin(async move {
-            println!("[callback]: before sending timeout");
             timeout_sender.send(Timeout).unwrap();
-            println!("[callback]: after sending timeout");
         }),
         timeout_interval,
     )
     .await;
-    println!("timer set");
+    // println!("timer set");
     timeout_receiver.recv().await.unwrap();
     println!("timeout received");
     let elapsed = start_instant.elapsed();
