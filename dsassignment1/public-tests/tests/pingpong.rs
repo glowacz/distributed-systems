@@ -33,10 +33,12 @@ struct Init {
 #[async_trait::async_trait]
 impl Handler<Init> for PingPong {
     async fn handle(&mut self, msg: Init) {
+        println!("Handling init message (inside {})", self.name);
         self.other = Some(msg.target);
         if self.first {
             self.other.as_ref().unwrap().send(Ball).await;
         }
+        println!("Handling init message (inside {}) FINISHED", self.name);
     }
 }
 
@@ -47,13 +49,17 @@ fn prepare_msg(name: &str, round: u32) -> String {
 #[async_trait::async_trait]
 impl Handler<Ball> for PingPong {
     async fn handle(&mut self, _msg: Ball) {
+        println!("Handling ball message (inside {})", self.name);
         self.log_sender
             .send(prepare_msg(self.name, self.received_msgs))
             .unwrap();
 
         self.received_msgs += 1;
+        println!("Message sent to logs; now received_msgs is {}", self.received_msgs);
         if self.received_msgs < ROUNDS {
+            println!("Sending message to other module... ");
             self.other.as_ref().unwrap().send(Ball).await;
+            println!("Message successfully sent to other module");
         }
     }
 }
@@ -91,6 +97,7 @@ async fn initialize_system(sys: &mut System) -> UnboundedReceiver<String> {
 #[tokio::test]
 #[timeout(300)]
 async fn ping_pong_runs_correctly() {
+    println!("=====================================================================\nTesting ping pong\n");
     let mut sys = System::new().await;
     let mut log_receiver = initialize_system(&mut sys).await;
 

@@ -5,7 +5,7 @@ use futures::{FutureExt, TryFutureExt};
 
 fn simple_future() {
     // Crate a future that is immediately ready with
-    // a value, which is then transformed:
+    // a value, which is then transformed:> impl std::future::Future<Output=()>
     let future = ready(7).map(|x| x * 2);
 
     // Run the future to completion in the current thread:
@@ -119,6 +119,7 @@ async fn action1_step2(str: String) {
 // are not completed:
 async fn action1() {
     // Run the first step and wait until it completes:
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let partial_result = action1_step1().await;
 
     // Run the second step (using the result of the first step)
@@ -146,9 +147,12 @@ async fn action2() {
     action2_step2(partial_result).await;
 }
 
-fn run_asynchronous_actions() {
+#[tokio::main]
+// needed to add the line above for the sleep to work (so that we're using tokio's runtime)
+async fn run_asynchronous_actions() {
     // Join two futures into a new future:
     let future = join(action1(), action2());
+    // let future = join(action2(), action1());
 
     // Run the future to completion in the current thread:
     futures::executor::block_on(future);

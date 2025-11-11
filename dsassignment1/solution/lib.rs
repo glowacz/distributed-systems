@@ -1,4 +1,9 @@
-use tokio::time::Duration;
+use async_trait::async_trait;
+use tokio::{
+    sync::{mpsc::channel, watch},
+    task::JoinSet,
+    time::{self, Duration},
+};
 
 pub trait Message: Send + 'static {}
 impl<T: Send + 'static> Message for T {}
@@ -13,23 +18,41 @@ pub trait Handler<M: Message>: Module {
     async fn handle(&mut self, msg: M);
 }
 
+#[async_trait]
+trait Handlee<T: Module>: Message {
+    async fn get_handled(self: Box<Self>, module: &mut T);
+}
+
+#[async_trait]
+impl<M: Message, T: Handler<M>> Handlee<T> for M {
+    async fn get_handled(self: Box<Self>, module: &mut T) {
+        module.handle(*self).await;
+    }
+}
+
+type SenderForModule<T> = tokio::sync::mpsc::Sender<Box<dyn Handlee<T>>>;
+type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T>>>;
+
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
 pub struct TimerHandle {
-    // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
+    tick_stop_tx: watch::Sender<bool>,
 }
 
 impl TimerHandle {
     /// Stops the sending of ticks resulting from the corresponding call to `ModuleRef::request_tick()`.
     /// If the ticks are already stopped, does nothing.
     pub async fn stop(&self) {
-        unimplemented!()
+        self.tick_stop_tx.send(true).unwrap_or_default();
     }
 }
 
 #[non_exhaustive]
 pub struct System {
-    // You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
+    tasks: JoinSet<()>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+    stop_txs: Vec<watch::Sender<bool>>,
 }
 
 impl System {
@@ -41,39 +64,86 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
-        unimplemented!()
+        // println!("[System::register_module]: starting registration");
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        // creating normal (bounded) channel for messages to apply backpressure:
+        // if someone tried to send too many messages at once to the module,
+        // at some point they would have to wait for the send operation to complete
+        // as some message would have to be read from the channel for the send operation to complete
+        // this way we avoid the problem of unbounded channels (from docs):
+        // "the process to run out of memory. In this case, the process will be aborted."
+        let (msg_tx, mut msg_rx): (SenderForModule<T>, ReceiverForModule<T>) = channel(64);
+        let (stop_all_ticks_tx, _stop_rx) = watch::channel(false);
+        self.stop_txs.push(stop_all_ticks_tx.clone());
+        let module_ref = ModuleRef {
+            msg_tx,
+            stop_all_ticks_tx,
+        };
+        let mut module = module_constructor(module_ref.clone());
+        self.tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = shutdown_rx.changed() => {
+                        // println!("Returning because of shutdown");
+                        return;
+                    }
+
+                    msg_opt = msg_rx.recv() => {
+                        if let Some(msg) = msg_opt {
+                            msg.get_handled(&mut module).await;
+                        }
+                        else {
+                            // println!("Returning because there was some error receiving");
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        // println!("[System::register_module]Module registered");
+        module_ref
     }
 
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
-        unimplemented!()
+        let tasks = JoinSet::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        System {
+            tasks,
+            shutdown_tx,
+            shutdown_rx,
+            stop_txs: vec![],
+        }
     }
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        unimplemented!()
+        // println!("[System::shutdown] starting shutdown");
+        self.shutdown_tx.send(true).unwrap_or_default();
+
+        for stop_tx in self.stop_txs.clone() {
+            stop_tx.send(true).unwrap_or_default();
+        }
+
+        while self.tasks.join_next().await.is_some() {
+            // println!("Joined some task");
+        }
+        // println!("[System::shutdown] shutdown finished");
     }
 }
 
 /// A reference to a module used for sending messages.
-// You can add fields to this struct (non_exhaustive makes it SemVer-compatible).
 #[non_exhaustive]
+// #[derive(Clone)]
 pub struct ModuleRef<T: Module>
 where
     Self: Send, // As T is Send, with this line we easily SemVer-promise ModuleRef is Send.
 {
-    // If the structure doesn't use `T` in any field, a marker field is required.
-    // **It can be removed if type `T` is used in some other field.**
-    //
-    // A marker field is required to inform the compiler how properties
-    // of this structure are related to properties of `T`
-    // (i.e., the struct behaves "as it would contain ...").
-    // For instance, the semantics would change if we held `&mut T` instead of `T`,
-    // therefore, we need to specify variance in `T`.
-    // Furthermore, the marker provides auto-trait and drop check resolution in regard to `T`.
-    // Typically, `PhantomData<T>` is used, but we don't want to propagate all auto-traits of `T`.
-    // We use the standard pattern to make our struct Send/Sync independent of `T`, but covariant.
-    _marker: std::marker::PhantomData<fn() -> T>,
+    // msg_tx: UnboundedSender<Box<dyn Handlee<T>>>,
+    msg_tx: SenderForModule<T>,
+    stop_all_ticks_tx: watch::Sender<bool>,
 }
 
 impl<T: Module> ModuleRef<T> {
@@ -82,7 +152,8 @@ impl<T: Module> ModuleRef<T> {
     where
         T: Handler<M>,
     {
-        unimplemented!()
+        let boxed_msg: Box<dyn Handlee<T>> = Box::new(msg);
+        let _ = self.msg_tx.send(boxed_msg).await;
     }
 
     /// Schedules a message to be sent to the module periodically with the given interval.
@@ -94,7 +165,48 @@ impl<T: Module> ModuleRef<T> {
         M: Message + Clone,
         T: Handler<M>,
     {
-        unimplemented!()
+        let msg_tx = self.msg_tx.clone();
+        let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
+        let _tick_stop_tx_clone = tick_stop_tx.clone();
+        let mut stop_all_ticks_rx = self.stop_all_ticks_tx.subscribe();
+
+        let _task = tokio::spawn(async move {
+            let _tick_stop_tx_dummy = _tick_stop_tx_clone.clone();
+            let mut interval = time::interval(delay);
+            interval.tick().await;
+            // println!("[request_tick]: after awaiting the first, immediate tick");
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = stop_all_ticks_rx.changed() => {
+                        let val = stop_all_ticks_rx.borrow_and_update().clone();
+                        if val {
+                            return;
+                        }
+                    }
+
+                    _changed = tick_stop_rx.changed() => {
+                        // println!("[request_tick]: value changed and now is {:?}", _changed);
+                        let val = tick_stop_rx.borrow_and_update().clone();
+                        if val {
+                            // println!("[request_tick]: value in the channel is true, ending this task...");
+                            return;
+                        }
+                    }
+
+                    _ = interval.tick() => {
+                        // println!("[request_tick]: received tick");
+                        let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
+                        let _res = msg_tx.send(boxed_msg).await;
+                    }
+                }
+            }
+        });
+
+        TimerHandle {
+            tick_stop_tx,
+        }
     }
 }
 
@@ -103,6 +215,9 @@ impl<T: Module> ModuleRef<T> {
 impl<T: Module> Clone for ModuleRef<T> {
     /// Creates a new reference to the same module.
     fn clone(&self) -> Self {
-        unimplemented!()
+        ModuleRef {
+            msg_tx: self.msg_tx.clone(),
+            stop_all_ticks_tx: self.stop_all_ticks_tx.clone(),
+        }
     }
 }
