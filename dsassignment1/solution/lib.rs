@@ -50,13 +50,6 @@ impl TimerHandle {
     }
 }
 
-// impl Drop for TimerHandle {
-//     fn drop(&mut self) {
-//         println!("[TimerHandle::drop]");
-//         self.tick_stop_tx.send(false).unwrap_or_default();
-//     }
-// }
-
 #[non_exhaustive]
 pub struct System {
     tasks: JoinSet<()>,
@@ -74,7 +67,7 @@ impl System {
         &mut self,
         module_constructor: impl FnOnce(ModuleRef<T>) -> T,
     ) -> ModuleRef<T> {
-        println!("[System::register_module]: starting registration");
+        // println!("[System::register_module]: starting registration");
         let mut shutdown_rx = self.shutdown_rx.clone();
         // creating normal (bounded) channel for messages to apply backpressure:
         // if someone tried to send too many messages at once to the module,
@@ -177,9 +170,11 @@ impl<T: Module> ModuleRef<T> {
     {
         let msg_tx = self.msg_tx.clone();
         let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
+        let _tick_stop_tx_clone = tick_stop_tx.clone();
         let mut stop_all_ticks_rx = self.stop_all_ticks_tx.subscribe();
 
         let _task = tokio::spawn(async move {
+            let _tick_stop_tx_dummy = _tick_stop_tx_clone.clone();
             let mut interval = time::interval(delay);
             interval.tick().await;
             // println!("[request_tick]: after awaiting the first, immediate tick");
@@ -194,38 +189,10 @@ impl<T: Module> ModuleRef<T> {
                         }
                     }
 
-                    changed = tick_stop_rx.changed() => {
-                        // if the sender(s) of tick_stop got dropped, don't end this task
-                        // this is normal as somebody might call request_tick 
-                        // and not store the result, resulting in the returned TimerHandle
-                        // being immediately dropped
-                        if changed.is_err() {
-                            // println!("[request_tick]: ERROR IN THE RECEIVE END OF THE CHANNEL FOR STOPPING TICKS");
-                            // println!("This is because the TimerRef was dropped, so shouldn't stop them\n\n");
-                            break;
-                        }
+                    _changed = tick_stop_rx.changed() => {
                         let val = tick_stop_rx.borrow_and_update().clone();
                         if val {
                             // println!("[request_tick]: value in the channel is true, ending this task...");
-                            return;
-                        }
-                        break;
-                    }
-
-                    _ = interval.tick() => {
-                        // println!("[request_tick]: received tick");
-                        let boxed_msg: Box<dyn Handlee<T>> = Box::new(message.clone());
-                        let _res = msg_tx.send(boxed_msg).await;
-                    }
-                }
-            }
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = stop_all_ticks_rx.changed() => {
-                        let val = stop_all_ticks_rx.borrow_and_update().clone();
-                        if val {
                             return;
                         }
                     }
