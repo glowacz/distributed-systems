@@ -177,3 +177,16 @@ async fn multiple_stopping_ticks_works() {
 
     system.shutdown().await;
 }
+
+#[tokio::test]
+#[timeout(500)]
+async fn dropping_module_ref_doesnt_hog_system() {
+    let mut system = System::new().await;
+    let (num_sender, _num_receiver) = unbounded_channel();
+    system
+        .register_module(|_| Counter { num: 0, num_sender })
+        .await;
+    
+    println!("dropping_module_ref_doesnt_hog_system successful");
+    // system.shutdown().await;
+}
