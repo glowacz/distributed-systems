@@ -190,6 +190,7 @@ impl<T: Module> ModuleRef<T> {
                     }
 
                     _changed = tick_stop_rx.changed() => {
+                        // println!("[request_tick]: value changed and now is {:?}", _changed);
                         let val = tick_stop_rx.borrow_and_update().clone();
                         if val {
                             // println!("[request_tick]: value in the channel is true, ending this task...");
