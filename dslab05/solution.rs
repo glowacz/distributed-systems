@@ -4,28 +4,18 @@ use rustls::{ClientConnection, RootCertStore, ServerConnection, StreamOwned};
 use rustls::pki_types::ServerName;
 use sha2::Sha256;
 use std::io::{Read, Write};
-// You can add here other imports from std or crates listed in Cargo.toml.
 use std::sync::Arc;
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub struct SecureClient<L: Read + Write> {
-    // Add here any fields you need.
-    // link: L,
     tls_link: StreamOwned<ClientConnection, L>,
     mac: Hmac<Sha256>,
-    // hmac_key: Vec<u8>,
-    // root_cert: String,
-    // server_hostname: ServerName<'static>,
 }
 
 pub struct SecureServer<L: Read + Write> {
-    // Add here any fields you need.
-    // link: L,
     tls_link: StreamOwned<ServerConnection, L>,
     mac: Hmac<Sha256>,
-    // server_private_key: String,
-    // server_full_chain: String,
 }
 
 impl<L: Read + Write> SecureClient<L> {
@@ -60,18 +50,14 @@ impl<L: Read + Write> SecureClient<L> {
         server_hostname: ServerName<'static>,
     ) -> Self {
         SecureClient {
-            // link,
             tls_link: SecureClient::create_tls_stream(link, root_cert, server_hostname),
             mac: HmacSha256::new_from_slice(hmac_key).unwrap(),
-            // root_cert: String::from(root_cert), 
-            // server_hostname 
         }
     }
 
     /// Sends the data to the server. The sent message follows the
     /// format specified in the description of the assignment.
     pub fn send_msg(&mut self, data: Vec<u8>) {
-        // println!("Sending {:?}", data);
         let msg_len = data.len() as u32;
         let msg_len_bytes = msg_len.to_be_bytes();
 
@@ -85,11 +71,7 @@ impl<L: Read + Write> SecureClient<L> {
         full_msg.extend_from_slice(data.as_slice());
         full_msg.extend_from_slice(&tag);
 
-        // println!("The full message was {:?}", full_msg);
-
         let _res = self.tls_link.write_all(&full_msg);
-        // let _res = self.link.write_all(&full_msg);
-        // println!("Data sent with result {:?}", _res);
     }
 }
 
@@ -128,11 +110,8 @@ impl<L: Read + Write> SecureServer<L> {
         server_full_chain: &str,
     ) -> Self {
         SecureServer {
-            // link, 
             tls_link: SecureServer::create_tls_stream(link, server_full_chain, server_private_key),
             mac: HmacSha256::new_from_slice(hmac_key).unwrap(),
-            // server_private_key: String::from(server_private_key), 
-            // server_full_chain: String::from(server_full_chain), 
         }
     }
 
@@ -140,30 +119,20 @@ impl<L: Read + Write> SecureServer<L> {
     /// (i.e., without the message size and without the HMAC tag) if the
     /// message's HMAC tag is correct. Otherwise, returns `SecureServerError`.
     pub fn recv_message(&mut self) -> Result<Vec<u8>, SecureServerError> {
-        println!("Receiving message...");
         let mut msg_len_bytes: [u8; 4] = [0, 0, 0, 0];
         self.tls_link.read_exact(&mut msg_len_bytes).unwrap();
-        // self.link.read_exact(&mut msg_len_bytes).unwrap();
-        println!("The bytes of the message length are {:?}", msg_len_bytes);
         let msg_len = u32::from_be_bytes(msg_len_bytes);
-        println!("The message length is {:?}", msg_len);
+
         let mut msg = Vec::with_capacity(msg_len as usize);
         msg.resize(msg_len as usize, 0);
         let _ = self.tls_link.read_exact(&mut msg);
-        // let _res = self.link.read_exact(&mut msg);
 
         let mut mac_tag = Vec::with_capacity(32);
         mac_tag.resize(32, 0);
         let _res = self.tls_link.read_exact(&mut mac_tag);
-        // let _res = self.link.read_exact(&mut mac_tag);
-
-        println!("Message received with result {:?}", _res);
-        println!("Received message is {:?}", msg);
 
         let mut mac = self.mac.clone();
         mac.update(&msg);
-        // let mac_ok = mac.verify_slice(&mac_tag).is_ok();
-        // println!("mac ok? {:?}", mac_ok);
 
         if let false = mac.verify_slice(&mac_tag).is_ok() {
             return Result::Err(SecureServerError::InvalidHmac)
@@ -178,5 +147,3 @@ pub enum SecureServerError {
     /// The HMAC tag of a message is invalid.
     InvalidHmac,
 }
-
-// You can add any private types, structs, consts, functions, methods, etc., you need.
