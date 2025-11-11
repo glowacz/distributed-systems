@@ -1,4 +1,4 @@
-use assignment_1_solution::{Handler, ModuleRef, System};
+use assignment_1_solution::{Handler, ModuleRef, System, TimerHandle};
 use ntest::timeout;
 use std::future::Future;
 use std::pin::Pin;
@@ -44,16 +44,13 @@ async fn set_timer(
     timeout_callback: Pin<Box<dyn Future<Output = ()> + Send>>,
     duration: Duration,
 ) -> ModuleRef<Timer> {
-// ) -> (ModuleRef<Timer>, TimerHandle) {
     let timer = system
         .register_module(|_| Timer::new(timeout_callback))
         .await;
-    // let thandle = timer.request_tick(Tick, duration).await;
     timer.request_tick(Tick, duration).await;
     // println!("is stop_tx closed? {}", thandle.is_closed());
-    // println!("Tick requested");
+    println!("Tick requested");
     timer
-    // (timer, thandle)
 }
 
 /// Token sent by the backdoor callback.
@@ -154,12 +151,16 @@ async fn second_tick_arrives_after_correct_interval_virtual_time() {
     set_timer(
         &mut sys,
         Box::pin(async move {
+            println!("[callback]: before sending timeout");
             timeout_sender.send(Timeout).unwrap();
+            println!("[callback]: after sending timeout");
         }),
         timeout_interval,
     )
     .await;
+    println!("timer set");
     timeout_receiver.recv().await.unwrap();
+    println!("timeout received");
     let elapsed = start_instant.elapsed();
     let tokio_vtime_elapsed = tokio_start_instant.elapsed();
 
@@ -172,5 +173,63 @@ async fn second_tick_arrives_after_correct_interval_virtual_time() {
         2 * timeout_interval,
         "The virtual time should be exact"
     );
+    println!("before system shutdown");
     sys.shutdown().await;
+    println!("after system shutdown");
+}
+
+/// Register a new `Timer` module and request ticks after `duration`.
+async fn not_dropping_set_timer(
+    system: &mut System,
+    timeout_callback: Pin<Box<dyn Future<Output = ()> + Send>>,
+    duration: Duration,
+// ) -> ModuleRef<Timer> {
+) -> (ModuleRef<Timer>, TimerHandle) {
+    let timer = system
+        .register_module(|_| Timer::new(timeout_callback))
+        .await;
+    let thandle = timer.request_tick(Tick, duration).await;
+    // println!("is stop_tx closed? {}", thandle.is_closed());
+    println!("Tick requested");
+    // timer
+    (timer, thandle)
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[timeout(300)]
+async fn not_dropping_timer_handle() {
+    let mut sys = System::new().await;
+    let (timeout_sender, mut timeout_receiver) = unbounded_channel::<Timeout>();
+    let timeout_interval = Duration::from_millis(50);
+
+    let start_instant = Instant::now();
+    let tokio_start_instant = tokio::time::Instant::now();
+    let (_timer_ref, _timer_handle) = not_dropping_set_timer(
+        &mut sys,
+        Box::pin(async move {
+            println!("[callback]: before sending timeout");
+            timeout_sender.send(Timeout).unwrap();
+            println!("[callback]: after sending timeout");
+        }),
+        timeout_interval,
+    )
+    .await;
+    println!("timer set");
+    timeout_receiver.recv().await.unwrap();
+    println!("timeout received");
+    let elapsed = start_instant.elapsed();
+    let tokio_vtime_elapsed = tokio_start_instant.elapsed();
+
+    assert!(
+        elapsed < timeout_interval,
+        "The wall clock time took too long"
+    );
+    assert_eq!(
+        tokio_vtime_elapsed,
+        2 * timeout_interval,
+        "The virtual time should be exact"
+    );
+    println!("before system shutdown");
+    sys.shutdown().await;
+    println!("before system shutdown");
 }

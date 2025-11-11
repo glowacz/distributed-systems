@@ -101,29 +101,29 @@ async fn unexpected_shutdown_works() {
     system.shutdown().await;
 }
 
-// #[tokio::test]
-// #[timeout(500000)]
-// async fn custom_stopping_ticks_works() {
-//     let mut system = System::new().await;
-//     let (num_sender, mut num_receiver) = unbounded_channel();
-//     let counter_ref = system
-//         .register_module(|_| Counter { num: 0, num_sender })
-//         .await;
+#[tokio::test]
+#[timeout(500)]
+async fn multiple_stopping_ticks_works() {
+    let mut system = System::new().await;
+    let (num_sender, mut num_receiver) = unbounded_channel();
+    let counter_ref = system
+        .register_module(|_| Counter { num: 0, num_sender })
+        .await;
 
-//     let timer_handle = counter_ref
-//         .request_tick(Tick, Duration::from_secs(2))
-//         .await;
-//     // ATTENTION: modified this timeout for my solution to work lol
-//     // I see that it's bad, it's not my computer that's too fast, the messages should be sent every 50 millis
-//     tokio::time::sleep(Duration::from_secs(5)).await;
-//     timer_handle.stop().await;
-//     tokio::time::sleep(Duration::from_secs(10)).await;
+    let timer_handle = counter_ref
+        .request_tick(Tick, Duration::from_millis(50))
+        .await;
+    tokio::time::sleep(Duration::from_millis(170)).await;
+    timer_handle.stop().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    timer_handle.stop().await;
+    timer_handle.stop().await;
 
-//     let mut received_numbers = Vec::new();
-//     while let Ok(num) = num_receiver.try_recv() {
-//         received_numbers.push(num);
-//     }
-//     assert_eq!(received_numbers, vec![0, 1, 2]);
+    let mut received_numbers = Vec::new();
+    while let Ok(num) = num_receiver.try_recv() {
+        received_numbers.push(num);
+    }
+    assert_eq!(received_numbers, vec![0, 1, 2]);
 
-//     system.shutdown().await;
-// }
+    system.shutdown().await;
+}
