@@ -30,8 +30,8 @@ impl<M: Message, T: Handler<M>> Handlee<T> for M {
     }
 }
 
-type SenderForModule<T> = tokio::sync::mpsc::Sender<Box<dyn Handlee<T> + Send>>;
-type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T> + Send>>;
+type SenderForModule<T> = tokio::sync::mpsc::Sender<Box<dyn Handlee<T>>>;
+type ReceiverForModule<T> = tokio::sync::mpsc::Receiver<Box<dyn Handlee<T>>>;
 
 /// A handle returned by `ModuleRef::request_tick()` can be used to stop sending further ticks.
 #[non_exhaustive]
@@ -40,9 +40,6 @@ pub struct TimerHandle {
 }
 
 impl TimerHandle {
-    pub fn is_closed(&self) -> bool {
-        self.tick_stop_tx.is_closed()
-    }
     /// Stops the sending of ticks resulting from the corresponding call to `ModuleRef::request_tick()`.
     /// If the ticks are already stopped, does nothing.
     pub async fn stop(&self) {
@@ -89,8 +86,8 @@ impl System {
                     biased;
 
                     _ = shutdown_rx.changed() => {
-                        // println!("Breaking loop because of shutdown");
-                        break;
+                        // println!("Returning because of shutdown");
+                        return;
                     }
 
                     msg_opt = msg_rx.recv() => {
@@ -98,8 +95,8 @@ impl System {
                             msg.get_handled(&mut module).await;
                         }
                         else {
-                            // println!("Breaking loop because there was some error receiving");
-                            break;
+                            // println!("Returning because there was some error receiving");
+                            return;
                         }
                     }
                 }
