@@ -42,4 +42,24 @@ mod tests {
         // Then:
         assert_eq!(storage.get("key").await, None);
     }
+
+    #[tokio::test]
+    #[timeout(500)]
+    async fn double_remove_works() {
+        // Given:
+        let root_storage_dir = tempdir().unwrap();
+        let mut storage = build_stable_storage(root_storage_dir.path().to_path_buf()).await;
+        storage
+            .put("key", vec![1_u8, 2, 3].as_slice())
+            .await
+            .unwrap();
+
+        // When:
+        storage.remove("key").await;
+        let res = storage.remove("key").await;
+
+        // Then:
+        assert_eq!(res, false);
+        assert_eq!(storage.get("key").await, None);
+    }
 }
