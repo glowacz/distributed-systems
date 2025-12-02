@@ -2,6 +2,7 @@ use bincode::config::standard;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -28,6 +29,11 @@ pub struct FailureDetectorModule {
     delta: Duration,
     delay: Duration,
     self_ref: ModuleRef<Self>,
+    self_uuid: Uuid,
+    other_addresses: HashMap<Uuid, SocketAddr>,
+    socket: Arc<UdpSocket>,
+    prev_alive_set: HashSet<Uuid>,
+    curr_alive_set: HashSet<Uuid>,
     // TODO add whatever fields necessary.
 }
 
@@ -39,6 +45,8 @@ impl FailureDetectorModule {
         ident: Uuid,
     ) -> ModuleRef<Self> {
         let addr = addresses.get(&ident).unwrap();
+        let mut other_addresses = addresses.clone();
+        other_addresses.remove(&ident);
         let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
 
         let module_ref = system
@@ -48,6 +56,11 @@ impl FailureDetectorModule {
                 delta,
                 delay: delta,
                 self_ref,
+                self_uuid: ident,
+                other_addresses,
+                socket: socket.clone(),
+                prev_alive_set: HashSet::new(),
+                curr_alive_set: HashSet::new()
                 // TODO initialize the fields you added
             })
             .await;
@@ -74,10 +87,28 @@ impl Handler<DetectorOperationUdp> for FailureDetectorModule {
     async fn handle(&mut self, msg: DetectorOperationUdp) {
         if self.enabled {
             let DetectorOperationUdp(operation, reply_addr) = msg;
-            unimplemented!(
-                "Process received UDP messages as in the algorithm.\
-                 Requests should be replied over UDP."
-            );
+            // let su = self.self_uuid;
+            match operation {
+                DetectorOperation::HeartbeatRequest => {
+                    let msg = DetectorOperation::HeartbeatResponse(self.self_uuid);
+                    let buf = bincode::serde::encode_to_vec(&msg, standard()).unwrap();
+                    // self.socket.connect(reply_addr).await.unwrap();
+                    self.socket.send_to(&buf, reply_addr).await.unwrap();
+                },
+                DetectorOperation::HeartbeatResponse(uuid) => {
+                    // println!("[{su}]: received heartbeat response from uuid {uuid}");
+                    self.curr_alive_set.insert(uuid);
+                },
+                DetectorOperation::AliveRequest => {
+                    // println!("[{su}]: received AliveRequest");
+                    let mut alive_set = self.prev_alive_set.clone();
+                    alive_set.insert(self.self_uuid);
+                    let msg = DetectorOperation::AliveInfo(alive_set);
+                    let buf = bincode::serde::encode_to_vec(&msg, standard()).unwrap();
+                    self.socket.send_to(&buf, reply_addr).await.unwrap();
+                }
+                _ => { }
+            }
         }
     }
 }
@@ -87,7 +118,28 @@ impl Handler<DetectorOperationUdp> for FailureDetectorModule {
 impl Handler<Timeout> for FailureDetectorModule {
     async fn handle(&mut self, _msg: Timeout) {
         if self.enabled {
-            unimplemented!("Implement the timeout logic.");
+            // let su = self.self_uuid;
+            // unimplemented!("Implement the timeout logic.");
+            // println!("[{su}]: period tick");
+            
+            for uuid in &self.curr_alive_set {
+                if !&self.prev_alive_set.contains(uuid) {
+                    // println!("[{su}]: process {uuid} no longer suspected as dead");
+                    self.timeout_handle.as_mut().unwrap().stop().await;
+                    self.delay += self.delta;
+                    self.timeout_handle = Some(self.self_ref.request_tick(Timeout, self.delay).await);
+                    break; // ????????????????????????????
+                }
+            }
+            
+            self.prev_alive_set = mem::take(&mut self.curr_alive_set);
+
+            // sending heartbeat messages to all other processes
+            for (_uuid, socket_addr) in &self.other_addresses {
+                let msg = DetectorOperation::HeartbeatRequest;
+                let buf = bincode::serde::encode_to_vec(&msg, standard()).unwrap();
+                self.socket.send_to(&buf, socket_addr).await.unwrap();
+            }
         }
     }
 }

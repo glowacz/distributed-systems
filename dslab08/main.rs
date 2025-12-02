@@ -41,6 +41,7 @@ async fn main() {
 
     let mut buf = [0; 512];
 
+    // println!("[main]: before sending AliveRequest");
     socket
         .send_to(
             bincode::serde::encode_to_vec(&DetectorOperation::AliveRequest, standard())
@@ -50,8 +51,9 @@ async fn main() {
         )
         .await
         .expect("cannot send?");
-
+    // println!("[main]: after sending AliveRequest");
     let len = socket.recv(&mut buf).await.unwrap();
+    // println!("[main]: after receiving AliveRequest");
     let alive_info = unwrap_alive_info(
         bincode::serde::decode_from_slice(&buf[..len], standard())
             .expect("Invalid format of alive info!")
