@@ -52,6 +52,6 @@ async fn read() {
 //     tokio::fs::remove_dir_all(root_storage_dir).await.unwrap();
 // }
 async fn main() {
-    // write().await;
-    read().await;
+    write().await;
+    // read().await;
 }

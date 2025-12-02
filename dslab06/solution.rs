@@ -1,8 +1,8 @@
-use std::{path::{PathBuf}};
+use std::{io::ErrorKind, path::PathBuf};
 
 use base64::{Engine, engine::general_purpose};
 use sha2::{Digest, Sha256};
-use tokio::{fs::{File, remove_file}, io::{AsyncReadExt, AsyncWriteExt}};
+use tokio::{fs::{File, create_dir_all, read_dir, remove_file}, io::{AsyncReadExt, AsyncWriteExt}};
 // You can add here other imports from std or crates listed in Cargo.toml.
 
 // You can add any private types, structs, consts, functions, methods, etc., you need.
@@ -32,11 +32,8 @@ pub trait StableStorage: Send + Sync {
 
 /// Creates a new instance of stable storage.
 pub async fn build_stable_storage(root_storage_dir: PathBuf) -> Box<dyn StableStorage> {
-    // unimplemented!()
-    Box::new(    
-        MyStableStorage {
-            root_storage_dir
-    })
+    let storage = MyStableStorage::new(root_storage_dir).await;
+    Box::new(storage)
 }
 
 struct MyStableStorage {
@@ -44,9 +41,48 @@ struct MyStableStorage {
 }
 
 impl MyStableStorage {
-    // fn new(root_storage_dir: PathBuf) -> Self {
-    //     MyStableStorage { root_storage_dir }
-    // }
+    async fn new(root_storage_dir: PathBuf) -> Self {
+        let storage = MyStableStorage { root_storage_dir };
+        storage.process_tmp_files().await;
+        storage
+    }
+
+    async fn process_tmp_files(&self) {
+        let tmp_dir_path = self.root_storage_dir.join("tmp");
+        create_dir_all(&tmp_dir_path).await.unwrap();
+
+        let mut tmp_dir_entries = read_dir(&tmp_dir_path).await.unwrap();
+        let tmp_dir = File::open(&tmp_dir_path).await.unwrap();
+        let root_dir = File::open(&self.root_storage_dir).await.unwrap();
+
+        while let Some(tmp_dir_entry) = tmp_dir_entries.next_entry().await.unwrap() {
+            let mut bytes = Vec::new();
+            let tmp_file_path = tmp_dir_entry.path();
+            File::open(&tmp_file_path).await.unwrap().read_to_end(&mut bytes).await.unwrap();
+
+            if bytes.len() >= CHECKSUM_LEN {
+                let value_len = bytes.len() - CHECKSUM_LEN;
+                let value = &bytes[..value_len];
+                let read_checksum = &bytes[value_len..];
+
+                let calc_checksum = self.calculate_checksum(value);
+
+                if read_checksum == calc_checksum {
+                    // good tmp file, but didn't manage to flush main file
+                    let file_name = tmp_dir_entry.file_name();
+                    let file_path = self.root_storage_dir.join(file_name);
+                    let mut file = File::create(file_path).await.unwrap();
+                    file.write_all(value).await.unwrap();
+                    file.sync_data().await.unwrap();
+                    root_dir.sync_data().await.unwrap();
+                }
+                // else can't do anything, bad tmp file
+            }
+
+            remove_file(&tmp_file_path).await.unwrap();
+            tmp_dir.sync_data().await.unwrap();
+        }
+    }
 
     fn calculate_checksum(&self, value: &[u8]) -> [u8; CHECKSUM_LEN] {
         let mut hasher= Sha256::new();
@@ -79,8 +115,8 @@ impl MyStableStorage {
 
     fn create_tmp_path(&self, key: &str) -> PathBuf {
         let mut path = PathBuf::new();
-        path.push(self.root_storage_dir.clone());
-        path.push("tmp_".to_owned() + key);
+        path.push(self.root_storage_dir.join("tmp"));
+        path.push(key);
         return path
     }
 
@@ -121,7 +157,6 @@ impl StableStorage for MyStableStorage {
         }
 
         let checksum = self.calculate_checksum(value);
-        // println!("length of checksum is {}", checksum.len());
 
         let tmp_path = self.create_tmp_path(key);
 
@@ -143,54 +178,21 @@ impl StableStorage for MyStableStorage {
     }
 
     async fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let tmp_path = self.create_tmp_path(key);
-
         let mut bytes = Vec::new();
+        let path = self.create_path(key);
+
+        let mut file = match File::open(path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::NotFound => return None,
+            Err(_) => panic!(),
+        };
         
-        let tmp_file_res = File::open(tmp_path).await;
-        if let Err(_e) = tmp_file_res {
-            let path = self.create_path(key);
-            
-            let file_res = File::open(path).await;
-            if let Err(_e) = file_res {
-                return  None;
-            }
-            
-            if let Err(_e) = file_res.unwrap().read_to_end(&mut bytes).await {
-                return  None;
-            }
+        file.read_to_end(&mut bytes).await.unwrap();
 
-            return Some(bytes);
-        }
-        else {
-            if let Err(_e) = tmp_file_res.unwrap().read_to_end(&mut bytes).await {
-                return  None;
-            }
-
-            let value_len = bytes.len() - CHECKSUM_LEN;
-            let value = &bytes[..value_len];
-            let read_checksum = &bytes[value_len..];
-
-            let calc_checksum = self.calculate_checksum(value);
-
-            if read_checksum != calc_checksum {
-                // println!("\n===================\nChecksum wrong!!!\n=====================");
-                return None;
-            }
-
-            return Some(Vec::from(value));
-        }
+        return Some(bytes);
     }
 
-    async fn remove(&mut self, key: &str) -> bool {
-        let tmp_path = self.create_tmp_path(key);
-        let tmp_file_res = File::open(tmp_path.clone()).await;
-        if let Ok(_v) = tmp_file_res {
-            if let Err(_e) = remove_file(tmp_path).await {
-                return false;
-            }
-        }
-        
+    async fn remove(&mut self, key: &str) -> bool {        
         let path = self.create_path(key);
         let file_res = File::open(path.clone()).await;
         if let Ok(_v) = file_res {
