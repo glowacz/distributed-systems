@@ -90,6 +90,13 @@ pub(crate) struct Disable;
 /// This structure serves as TM.
 pub(crate) struct DistributedStore {
     // Add any fields you need.
+    nodes: Vec<BoxedModuleSender<Node>>,
+    self_ref: BoxedModuleSender<Self>,
+    completed_callback: Option<
+        Box<dyn FnOnce(TwoPhaseResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+    can_commit_cnt: usize,
+    must_abort_cnt: usize,
+    committed_cnt: usize,
 }
 
 impl DistributedStore {
@@ -97,7 +104,21 @@ impl DistributedStore {
         nodes: Vec<BoxedModuleSender<Node>>,
         self_ref: BoxedModuleSender<Self>,
     ) -> Self {
-        unimplemented!()
+        Self { 
+            nodes,
+            self_ref,
+            completed_callback: None,
+            can_commit_cnt: 0,
+            must_abort_cnt: 0,
+            committed_cnt: 0,
+        }
+    }
+
+    async fn broadcast(&mut self, content: StoreMsgContent) {
+        let msg = Box::new(StoreMsg { sender: self.self_ref.clone(), content });
+        for nd in self.nodes.clone() {
+            nd.send_message(msg.clone()).await;
+        }
     }
 }
 
@@ -123,14 +144,46 @@ impl Node {
 #[async_trait::async_trait]
 impl Handler<TransactionMessage> for DistributedStore {
     async fn handle(&mut self, msg: TransactionMessage) {
-        unimplemented!()
+        self.can_commit_cnt = 0;
+        self.must_abort_cnt = 0;
+        self.committed_cnt = 0;
+
+        self.completed_callback = Some(msg.completed_callback);
+        self.broadcast(StoreMsgContent::RequestVote(msg.transaction)).await;
     }
 }
 
 #[async_trait::async_trait]
 impl Handler<NodeMsg> for DistributedStore {
     async fn handle(&mut self, msg: NodeMsg) {
-        unimplemented!()
+        match msg.content {
+            NodeMsgContent::RequestVoteResponse(res) => {
+                match res {
+                    TwoPhaseResult::Abort => { self.must_abort_cnt += 1 },
+                    TwoPhaseResult::Ok => { self.can_commit_cnt += 1 }
+                }
+                if self.must_abort_cnt + self.can_commit_cnt == self.nodes.len() {
+                    // let trans_result = if self.must_abort_cnt == 0 { TwoPhaseResult::Ok } else { TwoPhaseResult::Abort };
+                    if self.must_abort_cnt > 0 {
+                        if let Some(callback) = self.completed_callback.take() {
+                            self.broadcast(StoreMsgContent::Abort).await;
+                            callback(TwoPhaseResult::Abort).await;
+                        }
+                    }
+                    else {
+                        self.broadcast(StoreMsgContent::Commit).await;
+                    }
+                }
+            },
+            NodeMsgContent::FinalizationAck => {
+                self.committed_cnt += 1;
+                if self.committed_cnt == self.nodes.len() {
+                    if let Some(callback) = self.completed_callback.take() {
+                        callback(TwoPhaseResult::Ok).await;
+                    }    
+                }
+            }
+        }
     }
 }
 
@@ -138,8 +191,44 @@ impl Handler<NodeMsg> for DistributedStore {
 impl Handler<StoreMsg> for Node {
     async fn handle(&mut self, msg: StoreMsg) {
         if self.enabled {
-            let mut sender = msg.sender;
-            unimplemented!()
+            let sender = msg.sender;
+            match msg.content {
+                // 1st phase of 2PC
+                StoreMsgContent::RequestVote(transaction) => {
+                    self.pending_transaction = Some(transaction);
+                    let mut can_commit = true;
+                    for product in &self.products {
+                        if product.pr_type == transaction.pr_type && (product.price as i64) + (transaction.shift as i64) < 0 {
+                            can_commit = false;
+                        }
+                    }
+
+                    if can_commit {
+                        let reply_msg = Box::new(NodeMsg { content: NodeMsgContent::RequestVoteResponse(TwoPhaseResult::Ok)} );
+                        sender.send_message(reply_msg).await;
+                    }
+                    else {
+                        let reply_msg = Box::new(NodeMsg { content: NodeMsgContent::RequestVoteResponse(TwoPhaseResult::Abort)} );
+                        sender.send_message(reply_msg).await;
+                    }
+                },
+                // TM decided to commit (all processes were available to do so)
+                StoreMsgContent::Commit => {
+                    let transaction = self.pending_transaction.expect("There should be a transaction to commit");
+                    for product in self.products.iter_mut() {
+                        if product.pr_type == transaction.pr_type {
+                            product.price += transaction.shift as u64;
+                        }
+                    }
+
+                    let reply_msg = Box::new(NodeMsg { content: NodeMsgContent::FinalizationAck } );
+                    sender.send_message(reply_msg).await;
+                },
+                // TM decided to abort (some process couldn't commit)
+                StoreMsgContent::Abort => {
+                    self.pending_transaction = None
+                }
+            }
         }
     }
 }
@@ -148,7 +237,13 @@ impl Handler<StoreMsg> for Node {
 impl Handler<ProductPriceQuery> for Node {
     async fn handle(&mut self, msg: ProductPriceQuery) {
         if self.enabled {
-            unimplemented!()
+            for product in &self.products {
+                if product.identifier == msg.product_ident {
+                    msg.result_sender.send(ProductPrice(Some(product.price))).unwrap();
+                    return;
+                }
+            }
+            msg.result_sender.send(ProductPrice(None)).unwrap();
         }
     }
 }
