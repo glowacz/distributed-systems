@@ -198,8 +198,11 @@ impl Handler<StoreMsg> for Node {
                     self.pending_transaction = Some(transaction);
                     let mut can_commit = true;
                     for product in &self.products {
-                        if product.pr_type == transaction.pr_type && (product.price as i64) + (transaction.shift as i64) < 0 {
-                            can_commit = false;
+                        if product.pr_type == transaction.pr_type {
+                            match product.price.checked_add_signed(transaction.shift as i64) {
+                                Some(_) => {},
+                                None => { can_commit = false; },
+                            }
                         }
                     }
 
@@ -217,7 +220,7 @@ impl Handler<StoreMsg> for Node {
                     let transaction = self.pending_transaction.expect("There should be a transaction to commit");
                     for product in self.products.iter_mut() {
                         if product.pr_type == transaction.pr_type {
-                            product.price += transaction.shift as u64;
+                            product.price = product.price.checked_add_signed(transaction.shift as i64).expect("The shift from the transaction results in a negative number, even though all modules declared otherwise");
                         }
                     }
 
