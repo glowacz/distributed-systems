@@ -1,6 +1,7 @@
 mod public_test;
 mod relay_util;
 mod solution;
+mod custom_test;
 
 use crate::solution::{
     DistributedStore, Node, Product, ProductPrice, ProductPriceQuery, ProductType, Transaction,
