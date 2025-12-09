@@ -159,6 +159,45 @@ mod tests {
 
         println!("Scenario 2 (Abort/Atomicity) passed.");
 
+        // --- SCENARIO 3: Recovery and Successful Commit ---
+        // We now attempt a VALID transaction on the same category (Toys) that failed previously.
+        // Decrease Toys by 10.
+        // Node 2 (Cheap Toy): 20 - 10 = 10 (Valid)
+        // Node 3 (Expensive Toy): 100 - 10 = 90 (Valid)
+        // This proves the system is not "stuck" after the previous abort.
+
+        let (tx_recovery_sender, tx_recovery_receiver) = channel();
+        distributed_store
+            .send(TransactionMessage {
+                transaction: Transaction {
+                    pr_type: ProductType::Toys,
+                    shift: -10,
+                },
+                completed_callback: Box::new(|result| {
+                    Box::pin(async move {
+                        tx_recovery_sender.send(result).unwrap();
+                    })
+                }),
+            })
+            .await;
+
+        let result = tx_recovery_receiver.await.expect("Transaction timed out");
+        assert_eq!(result, TwoPhaseResult::Ok, "Expected successful commit after previous abort");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify Updates
+        // Cheap Toy (Node 2): 20 - 10 = 10
+        assert_eq!(send_query(&node_2, cheap_toy_id).await.0.unwrap(), 10);
+        
+        // Expensive Toy (Node 3): 1100 - 10 = 90
+        assert_eq!(send_query(&node_3, expensive_toy_id).await.0.unwrap(), 90);
+        
+        // Unrelated Product (Laptop Node 1): Should remain at 1100 (from Scenario 1)
+        assert_eq!(send_query(&node_1, laptop_id).await.0.unwrap(), 1100);
+
+        println!("Scenario 3 (Recovery/Commit) passed.");
+
         system.shutdown().await;
     }
 }
