@@ -125,8 +125,8 @@ mod tests {
 
         // --- SCENARIO 2: Distributed Abort (Atomicity Check) ---
         // We attempt to decrease the price of Toys by 30.
-        // Node 3 (Expensive Toy): 100 - 30 = 70 (Valid, would vote Commit)
-        // Node 2 (Cheap Toy): 20 - 30 = -10 (Invalid <= 0, must vote Abort)
+        // Node 3 (Expensive Toy): 100 - 20 = 80 (Valid, would vote Commit)
+        // Node 2 (Cheap Toy): 20 - 20 = 0 (Invalid <= 0, must vote Abort)
         // Expected Result: The Store should aggregate votes and abort globally.
 
         let (tx_fail_sender, tx_fail_receiver) = channel();
@@ -134,7 +134,7 @@ mod tests {
             .send(TransactionMessage {
                 transaction: Transaction {
                     pr_type: ProductType::Toys,
-                    shift: -30,
+                    shift: -20,
                 },
                 completed_callback: Box::new(|result| {
                     Box::pin(async move {
@@ -190,7 +190,7 @@ mod tests {
         // Cheap Toy (Node 2): 20 - 10 = 10
         assert_eq!(send_query(&node_2, cheap_toy_id).await.0.unwrap(), 10);
         
-        // Expensive Toy (Node 3): 1100 - 10 = 90
+        // Expensive Toy (Node 3): 100 - 10 = 90
         assert_eq!(send_query(&node_3, expensive_toy_id).await.0.unwrap(), 90);
         
         // Unrelated Product (Laptop Node 1): Should remain at 1100 (from Scenario 1)

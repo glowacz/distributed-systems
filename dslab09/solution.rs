@@ -200,7 +200,11 @@ impl Handler<StoreMsg> for Node {
                     for product in &self.products {
                         if product.pr_type == transaction.pr_type {
                             match product.price.checked_add_signed(transaction.shift as i64) {
-                                Some(_) => {},
+                                Some(res) => {
+                                    if res == 0 {
+                                        can_commit = false;
+                                    }
+                                },
                                 None => { can_commit = false; },
                             }
                         }
