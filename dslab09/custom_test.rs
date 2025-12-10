@@ -7,6 +7,7 @@ mod tests {
     };
     use module_system::{ModuleRef, System};
     use std::time::Duration;
+    use std::vec;
     use tokio::sync::oneshot::channel;
     use uuid::Uuid;
 
@@ -199,5 +200,100 @@ mod tests {
         println!("Scenario 3 (Recovery/Commit) passed.");
 
         system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn zero_products_works() {
+        let mut system = System::new().await;
+
+        // --- Register Modules ---
+
+        let node_1 = system.register_module(|_| Node::new(vec![])).await;
+        let node_2 = system.register_module(|_| Node::new(vec![])).await;
+        let node_3 = system.register_module(|_| Node::new(vec![])).await;
+
+        // The DistributedStore communicates with all three nodes
+        let shards: Vec<Box<dyn SenderTo<Node>>> = vec![
+            Box::new(node_1.clone()),
+            Box::new(node_2.clone()),
+            Box::new(node_3.clone()),
+        ];
+
+        let distributed_store = system
+            .register_module(|sr: ModuleRef<DistributedStore>| {
+                DistributedStore::new(shards, Box::new(sr))
+            })
+            .await;
+
+        // --- SCENARIO 1: Successful Distributed Commit ---
+        // We increase the price of all Electronics by 100.
+        // There are no Electronics, but it should succeed
+
+        let (tx_success_sender, tx_success_receiver) = channel();
+        distributed_store
+            .send(TransactionMessage {
+                transaction: Transaction {
+                    pr_type: ProductType::Electronics,
+                    shift: 100,
+                },
+                completed_callback: Box::new(|result| {
+                    Box::pin(async move {
+                        tx_success_sender.send(result).unwrap();
+                    })
+                }),
+            })
+            .await;
+
+        let result = tx_success_receiver.await.expect("Transaction timed out");
+        assert_eq!(result, TwoPhaseResult::Ok, "Expected successful commit for valid price increase");
+
+        // Allow some time for messages to propagate if the implementation is eventually consistent (though 2PC usually locks)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify Updates
+        // Laptop (Node 1): 1000 + 100 = 1100
+        assert_eq!(send_query(&node_1, Uuid::new_v4()).await.0, None);
+        assert_eq!(send_query(&node_1, Uuid::new_v4()).await.0, None);
+        // Phone (Node 2): 800 + 100 = 900
+        assert_eq!(send_query(&node_2, Uuid::new_v4()).await.0, None);
+        // Book (Node 1): Unchanged
+        assert_eq!(send_query(&node_3, Uuid::new_v4()).await.0, None);
+
+        println!("Scenario X (Empty products) passed.");
+    }
+
+    #[tokio::test]
+    async fn zero_nodes_works() {
+        let mut system = System::new().await;
+
+        let distributed_store = system
+            .register_module(|sr: ModuleRef<DistributedStore>| {
+                DistributedStore::new(vec![], Box::new(sr))
+            })
+            .await;
+
+        // --- SCENARIO 1: Successful Distributed Commit ---
+        // We increase the price of all Electronics by 100.
+        // There are no Electronics, but it should succeed
+
+        let (tx_success_sender, tx_success_receiver) = channel();
+        distributed_store
+            .send(TransactionMessage {
+                transaction: Transaction {
+                    pr_type: ProductType::Electronics,
+                    shift: -1000,
+                },
+                completed_callback: Box::new(|result| {
+                    Box::pin(async move {
+                        tx_success_sender.send(result).unwrap();
+                    })
+                }),
+            })
+            .await;
+
+        let result = tx_success_receiver.await.expect("Transaction timed out");
+        assert_eq!(result, TwoPhaseResult::Ok, "Expected successful commit for valid price increase");
+
+        println!("Scenario Y (No nodes) passed.");
     }
 }

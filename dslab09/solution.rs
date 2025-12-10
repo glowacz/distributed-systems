@@ -148,6 +148,11 @@ impl Handler<TransactionMessage> for DistributedStore {
         self.must_abort_cnt = 0;
         self.committed_cnt = 0;
 
+        if self.nodes.len() == 0 {
+            (msg.completed_callback)(TwoPhaseResult::Ok).await;
+            return;
+        }
+
         self.completed_callback = Some(msg.completed_callback);
         self.broadcast(StoreMsgContent::RequestVote(msg.transaction)).await;
     }
