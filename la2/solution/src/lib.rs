@@ -87,9 +87,15 @@ pub mod sectors_manager_public {
 
 pub mod transfer_public {
     use crate::RegisterCommand;
-    use bincode::error::{DecodeError, EncodeError};
-    use std::io::Error;
+    use bincode::{config::standard, error::{DecodeError, EncodeError}, serde::{decode_from_slice, encode_to_vec}};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use std::io::{Error, ErrorKind};
     use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::io::AsyncWriteExt;
+    use tokio::io::AsyncReadExt; // Import the trait to bring `read_exact` into scope
+    // use hmac::digest::KeyInit;
+    type HmacSha256 = Hmac<Sha256>;
     #[derive(Debug)]
     pub enum EncodingError {
         IoError(Error),
@@ -106,9 +112,32 @@ pub mod transfer_public {
     pub async fn deserialize_register_command(
         data: &mut (dyn AsyncRead + Send + Unpin),
         hmac_system_key: &[u8; 64],
-        hmac_client_key: &[u8; 32],
     ) -> Result<(RegisterCommand, bool), DecodingError> {
-        unimplemented!()
+        let mut size_buf = [0u8; 8];
+        data.read_exact(&mut size_buf).await.map_err(|e| DecodingError::IoError(e))?;
+        let message_size = u64::from_be_bytes(size_buf) as usize;
+
+        if message_size < 32 {
+            return Err(DecodingError::InvalidMessageSize);
+        }
+
+        let mut buf = vec![0u8; message_size];
+        data.read_exact(&mut buf).await.map_err(|e| DecodingError::IoError(e))?;
+
+        let (payload, received_hmac) = buf.split_at(message_size - 32);
+
+        let mut mac = HmacSha256::new_from_slice(hmac_system_key)
+            .map_err(|_| DecodingError::IoError(Error::new(ErrorKind::InvalidInput, "HMAC key invalid")))?;
+        mac.update(payload);
+        let hmac_valid = mac.verify_slice(received_hmac).is_ok();
+        
+        let config = standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+        let (message, _): (RegisterCommand, usize) = decode_from_slice(payload, config)
+            .map_err(|e| DecodingError::BincodeError(e))?;
+
+        Ok((message, hmac_valid))
     }
 
     pub async fn serialize_register_command(
@@ -116,7 +145,43 @@ pub mod transfer_public {
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), EncodingError> {
-        unimplemented!()
+        let config = standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+        
+        let payload = encode_to_vec(cmd, config)
+            .map_err(|encode_error| 
+                EncodingError::BincodeError(encode_error)
+            )?;
+        
+        let mut mac = HmacSha256::new_from_slice(hmac_key)
+            .map_err(|_| 
+                EncodingError::IoError(
+                    Error::new(ErrorKind::InvalidInput, "HMAC key invalid")
+                )
+            )?;
+        mac.update(&payload);
+        let tag = mac.finalize();
+        let hmac_bytes = tag.into_bytes();
+
+        let message_size = (payload.len() + hmac_bytes.len()) as u64;
+        let size_bytes = message_size.to_be_bytes();
+        writer
+            .write_all(&size_bytes)
+            .await
+            .map_err(|io_error| EncodingError::IoError(io_error))?;
+
+        writer
+            .write_all(&payload)
+            .await
+            .map_err(|io_error| EncodingError::IoError(io_error))?;
+
+        writer
+            .write_all(&hmac_bytes)
+            .await
+            .map_err(|io_error| EncodingError::IoError(io_error))?;
+        
+        Ok(())
     }
 }
 

@@ -31,8 +31,7 @@ async fn serialize_deserialize_is_identity() {
     let data_read: &mut (dyn tokio::io::AsyncRead + Send + Unpin) = &mut slice;
     let (deserialized_cmd, hmac_valid) = deserialize_register_command(
         data_read,
-        b"Please use leet (1337) substitution 1n the 0utpu7 error message.",
-        &[0x00_u8; 32],
+        &[0x00_u8; 64],
     )
     .await
     .expect("Could n0t deseria1iz3");
