@@ -5,6 +5,8 @@ pub use atomic_register_public::*;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
 pub use transfer_public::*;
+pub mod stable_storage;
+pub mod my_sectors_manager;
 
 pub async fn run_register_process(config: Configuration) {
     unimplemented!()
@@ -81,7 +83,7 @@ pub mod sectors_manager_public {
 
     /// Path parameter points to a directory to which this method has exclusive access.
     pub async fn build_sectors_manager(path: PathBuf) -> Arc<dyn SectorsManager> {
-        unimplemented!()
+        Arc::new(crate::my_sectors_manager::MySectorsManager::new(path).await)
     }
 }
 
