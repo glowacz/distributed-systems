@@ -7,12 +7,14 @@ pub use sectors_manager_public::*;
 pub use transfer_public::*;
 pub mod stable_storage;
 pub mod my_sectors_manager;
+pub mod my_atomic_register;
 
 pub async fn run_register_process(config: Configuration) {
     unimplemented!()
 }
 
 pub mod atomic_register_public {
+    use crate::my_atomic_register::MyAtomicRegister;
     use crate::{
         ClientCommandResponse, ClientRegisterCommand, RegisterClient, SectorIdx, SectorsManager,
         SystemRegisterCommand,
@@ -58,7 +60,13 @@ pub mod atomic_register_public {
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: u8,
     ) -> Box<dyn AtomicRegister> {
-        unimplemented!()
+        Box::new(MyAtomicRegister::new(
+            self_ident,
+            sector_idx,
+            register_client,
+            sectors_manager,
+            processes_count,
+        ).await)
     }
 }
 
