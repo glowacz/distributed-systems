@@ -81,7 +81,12 @@ impl MySectorsManager {
 #[async_trait::async_trait]
 impl SectorsManager for MySectorsManager {
     async fn read_data(&self, idx: SectorIdx) -> SectorVec {
-        let file_name = self.get_filename_from_idx(idx).await.unwrap();
+        let file_name = match self.get_filename_from_idx(idx).await {
+            None => {
+                return SectorVec(Box::new(Array([0u8; 4096])));
+            },
+            Some(name) => name,
+        };
         let data_vec = self.storage.get(file_name.as_str()).await.unwrap();
         let data_array = data_vec.try_into().unwrap();
         let wrapped_array = Array(data_array);
@@ -90,10 +95,16 @@ impl SectorsManager for MySectorsManager {
 
     async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8) {
         // let file_name = self.idx_map.get(&idx).unwrap();
-        let file_name = self.get_filename_from_idx(idx).await.unwrap();
-        let file_name_vec = file_name.split('_').collect::<Vec<&str>>();
-        
-        (file_name_vec[1].parse::<u64>().unwrap(), file_name_vec[2].parse::<u8>().unwrap())
+        let file_name_opt = self.get_filename_from_idx(idx).await;
+        match file_name_opt {
+            None => return (0, 0),
+            Some(file_name) => {
+                let file_name_vec = file_name.split('_').collect::<Vec<&str>>();
+                // comment in lib.rs says that we will have exclusive access to our directory
+                // so unwrap should be safe here
+                (file_name_vec[1].parse::<u64>().unwrap(), file_name_vec[2].parse::<u8>().unwrap())       
+            }
+        }
     }
 
     async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
