@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use serde_big_array::Array;
 use uuid::Uuid;
 
 use crate::{AtomicRegister, Broadcast, ClientCommandResponse, ClientRegisterCommand, ClientRegisterCommandContent, OperationReturn, RegisterClient, SECTOR_SIZE, SectorVec, SectorsManager, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
@@ -76,15 +77,17 @@ impl MyAtomicRegister {
     fn highest(&self) -> (u64, u8, SectorVec) {
         let mut max_ts = 0;
         let mut max_wr = 0;
-        let mut val_opt: Option<SectorVec> = None;
+        let mut readval: SectorVec = SectorVec(Box::new(Array([0u8; SECTOR_SIZE])));
         for (_proc_id, (ts, wr, val)) in self.data.readlist.clone() {
             if ts > max_ts || (ts == max_ts && wr > max_wr) {
                 max_ts = ts;
                 max_wr = wr;
-                val_opt = Some(val.clone());
+                // val_opt = Some(val.clone());
+                readval = val.clone();
             }
         }
-        (max_ts, max_wr, val_opt.unwrap())
+        // (max_ts, max_wr, val_opt.unwrap())
+        (max_ts, max_wr, readval)
     }
 
     async fn store(&mut self, ts: u64, wr: u8, val: &SectorVec) {
@@ -106,6 +109,9 @@ impl AtomicRegister for MyAtomicRegister {
                 + Sync,
         >,
     ) {
+        // println!("Client command (is read? {:?}), sector {}, id {} triggered (on {})", 
+            // cmd.content == ClientRegisterCommandContent::Read, cmd.header.sector_idx, cmd.header.request_identifier, self.data.self_rank);
+
         self.data.op_id = Uuid::new_v4();
         self.data.readlist.clear();
         self.data.acklist.clear();
@@ -169,7 +175,8 @@ impl AtomicRegister for MyAtomicRegister {
                 }
                 self.data.readlist.insert(cmd.header.process_identifier, (timestamp, write_rank, sector_data));
 
-                if self.data.readlist.len() as u8 > self.n / 2 && (self.data.reading || self.data.writing) {
+                if self.data.readlist.len() as u8 >= self.n / 2 && (self.data.reading || self.data.writing) {
+                     // >= because (ts, wr, val) from self is not in readlist
                     self.data.readlist.insert(self.data.self_rank, (self.data.ts, self.data.wr, self.data.val.clone()));
                     let (maxts, rr, readval) = self.highest();
                     self.data.readlist.clear();
@@ -248,11 +255,14 @@ impl AtomicRegister for MyAtomicRegister {
                 }
                 self.data.acklist.insert(cmd.header.process_identifier, true);
 
-                if self.data.acklist.len() as u8 > self.n / 2 {
+                if self.data.acklist.len() as u8 >= self.n / 2 { // >= because self ack is not in acklist
                     self.data.acklist.clear();
                     self.data.write_phase = false;
 
                     if self.data.reading {
+                        // let req_id = self.request_ids.get(cmd.header.msg_ident.clone().as_ref()).unwrap_or(&0);
+                        // println!("[READ] operation {req_id} completed (on {})", self.data.self_rank);
+
                         self.data.reading = false;
                         let response = ClientCommandResponse {
                             status: crate::StatusCode::Ok,
@@ -264,18 +274,21 @@ impl AtomicRegister for MyAtomicRegister {
                         let callback = self.callbacks.remove(&cmd.header.msg_ident).unwrap();
                         callback(response).await;
                     }
-                }
-                else {
-                    self.data.writing = false;
-                    let response = ClientCommandResponse {
-                        status: crate::StatusCode::Ok,
-                        request_identifier: self.request_ids.remove(&cmd.header.msg_ident).unwrap_or_default(),
-                        op_return: OperationReturn::Write,
-                    };
-                    let callback = self.callbacks.remove(&cmd.header.msg_ident).unwrap();
-                    callback(response).await;
-                }
+                    else {
+                        // let req_id = self.request_ids.get(cmd.header.msg_ident.clone().as_ref()).unwrap_or(&0);
+                        // println!("[WRITE] operation sector {}, id {req_id} completed (on {})", self.sector_idx, self.data.self_rank);
 
+                        self.data.writing = false;
+                        let response = ClientCommandResponse {
+                            status: crate::StatusCode::Ok,
+                            request_identifier: self.request_ids.remove(&cmd.header.msg_ident).unwrap_or_default(),
+                            op_return: OperationReturn::Write,
+                        };
+                        let callback = self.callbacks.remove(&cmd.header.msg_ident).unwrap();
+                        callback(response).await;
+                        
+                    }
+                }
             },
         }
     }
