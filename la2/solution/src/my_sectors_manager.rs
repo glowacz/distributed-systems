@@ -3,9 +3,7 @@ use crate::{SectorIdx, SectorVec};
 use std::path::PathBuf;
 use crate::stable_storage::{MyStableStorage, StableStorage, build_my_stable_storage};
 use serde_big_array::Array;
-use tokio::{fs::{File, create_dir_all, read_dir, remove_file}, io::{AsyncReadExt, AsyncWriteExt}};
-use std::collections::HashMap;
-
+use tokio::fs::read_dir;
 pub struct MySectorsManager {
     path: PathBuf,
     storage: MyStableStorage,
@@ -14,15 +12,10 @@ pub struct MySectorsManager {
 
 impl MySectorsManager {
     pub async fn new(path: PathBuf) -> Self {
-        let mut manager = Self { 
+        Self { 
             path: path.clone(),
             storage: build_my_stable_storage(path.clone()).await,
-            // idx_map: HashMap::new(),
-        };
-
-        // manager.create_idx_map().await;
-
-        manager
+        }
     }
 
     // pub async fn create_idx_map(&mut self) {
