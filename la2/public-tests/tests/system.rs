@@ -14,9 +14,17 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+fn init_logs() {
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init();
+}
+
 #[tokio::test]
 #[timeout(4000)]
 async fn single_process_system_completes_operations() {
+    init_logs();
     // given
     let hmac_client_key = [5; 32];
     let tcp_port = 30_287;
@@ -79,6 +87,7 @@ async fn single_process_system_completes_operations() {
 #[serial_test::serial]
 #[timeout(30000)]
 async fn concurrent_operations_on_the_same_sector() {
+    init_logs();
     // given
     let port_range_start = 21518;
     let n_clients = 16;
@@ -138,6 +147,7 @@ async fn concurrent_operations_on_the_same_sector() {
 #[serial_test::serial]
 #[timeout(40000)]
 async fn large_number_of_operations_execute_successfully() {
+    init_logs();
     // given
     let port_range_start = 21625;
     let commands_total = 32;

@@ -32,3 +32,6 @@ path = "src/lib.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dev-dependencies]
+env_logger = "0.11"
