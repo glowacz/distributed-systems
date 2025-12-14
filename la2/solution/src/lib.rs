@@ -1,6 +1,9 @@
 mod domain;
 
+use std::sync::Arc;
+
 pub use crate::domain::*;
+use crate::my_register_client::{MyRegisterClient, init_registers};
 pub use atomic_register_public::*;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
@@ -8,9 +11,16 @@ pub use transfer_public::*;
 pub mod stable_storage;
 pub mod my_sectors_manager;
 pub mod my_atomic_register;
+pub mod my_register_client;
+pub mod alt_register_client;
 
 pub async fn run_register_process(config: Configuration) {
-    unimplemented!()
+    let self_addr = config.public.tcp_locations[(config.public.self_rank - 1) as usize].clone();
+    let storage_dir = config.public.storage_dir.clone();
+
+    let register_client = Arc::new(MyRegisterClient::new(config));
+    // this is not a tokio task, but it will spawn a task for each of its operations (send/broadcast)
+    let _ = init_registers(register_client, self_addr, storage_dir).await;
 }
 
 pub mod atomic_register_public {
@@ -96,9 +106,10 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::RegisterCommand;
+    use crate::{ClientCommandResponse, RegisterCommand};
     use bincode::{config::standard, error::{DecodeError, EncodeError}, serde::{decode_from_slice, encode_to_vec}};
     use hmac::{Hmac, Mac};
+    use serde::Serialize;
     use sha2::Sha256;
     use std::io::{Error, ErrorKind};
     use tokio::io::{AsyncRead, AsyncWrite};
@@ -119,39 +130,8 @@ pub mod transfer_public {
         InvalidMessageSize,
     }
 
-    pub async fn deserialize_register_command(
-        data: &mut (dyn AsyncRead + Send + Unpin),
-        hmac_system_key: &[u8; 64],
-    ) -> Result<(RegisterCommand, bool), DecodingError> {
-        let mut size_buf = [0u8; 8];
-        data.read_exact(&mut size_buf).await.map_err(|e| DecodingError::IoError(e))?;
-        let message_size = u64::from_be_bytes(size_buf) as usize;
-
-        if message_size < 32 {
-            return Err(DecodingError::InvalidMessageSize);
-        }
-
-        let mut buf = vec![0u8; message_size];
-        data.read_exact(&mut buf).await.map_err(|e| DecodingError::IoError(e))?;
-
-        let (payload, received_hmac) = buf.split_at(message_size - 32);
-
-        let mut mac = HmacSha256::new_from_slice(hmac_system_key)
-            .map_err(|_| DecodingError::IoError(Error::new(ErrorKind::InvalidInput, "HMAC key invalid")))?;
-        mac.update(payload);
-        let hmac_valid = mac.verify_slice(received_hmac).is_ok();
-        
-        let config = standard()
-            .with_big_endian()
-            .with_fixed_int_encoding();
-        let (message, _): (RegisterCommand, usize) = decode_from_slice(payload, config)
-            .map_err(|e| DecodingError::BincodeError(e))?;
-
-        Ok((message, hmac_valid))
-    }
-
-    pub async fn serialize_register_command(
-        cmd: &RegisterCommand,
+    pub async fn serialize<T: Serialize>(
+        cmd: &T,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), EncodingError> {
@@ -192,6 +172,77 @@ pub mod transfer_public {
             .map_err(|io_error| EncodingError::IoError(io_error))?;
         
         Ok(())
+    }
+
+    // async fn deserialize_register_command_any_hmac(
+    //     data: &mut (dyn AsyncRead + Send + Unpin),
+    //     hmac_key: &[u8],
+    // ) -> Result<(RegisterCommand, bool), DecodingError> 
+
+    // pub async fn deserialize_register_command_from_client(
+    //     data: &mut (dyn AsyncRead + Send + Unpin),
+    //     hmac_client_key: &[u8; 32],
+    // ) -> Result<(RegisterCommand, bool), DecodingError> {
+    //     deserialize_register_command_any_hmac(data, hmac_client_key).await
+    // }
+
+
+    pub async fn deserialize_register_command(
+        data: &mut (dyn AsyncRead + Send + Unpin),
+        hmac_system_key: &[u8; 64],
+        hmac_client_key: &[u8; 32],
+    ) -> Result<(RegisterCommand, bool), DecodingError> {
+        let mut size_buf = [0u8; 8];
+        data.read_exact(&mut size_buf).await.map_err(|e| DecodingError::IoError(e))?;
+        let message_size = u64::from_be_bytes(size_buf) as usize;
+
+        if message_size < 32 {
+            return Err(DecodingError::InvalidMessageSize);
+        }
+
+        let mut buf = vec![0u8; message_size];
+        data.read_exact(&mut buf).await.map_err(|e| DecodingError::IoError(e))?;
+
+        let (payload, received_hmac) = buf.split_at(message_size - 32);
+
+        // first checking with system hmac key as there 
+        // should be more system than client messages
+        let mut mac = HmacSha256::new_from_slice(hmac_system_key)
+            .map_err(|_| DecodingError::IoError(Error::new(ErrorKind::InvalidInput, "HMAC key invalid")))?;
+        mac.update(payload);
+        let mut hmac_valid = mac.verify_slice(received_hmac).is_ok();
+
+        // even if the message isn't signed with a valid hmac using system key, 
+        // it still a valid message (with valid hmac) from client
+        if !hmac_valid {
+            let mut mac = HmacSha256::new_from_slice(hmac_client_key)
+            .map_err(|_| DecodingError::IoError(Error::new(ErrorKind::InvalidInput, "HMAC key invalid")))?;
+            mac.update(payload);
+            hmac_valid = mac.verify_slice(received_hmac).is_ok();
+        }
+        
+        let config = standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+        let (message, _): (RegisterCommand, usize) = decode_from_slice(payload, config)
+            .map_err(|e| DecodingError::BincodeError(e))?;
+
+        Ok((message, hmac_valid))
+    }
+    pub async fn serialize_register_command(
+        cmd: &RegisterCommand,
+        writer: &mut (dyn AsyncWrite + Send + Unpin),
+        hmac_key: &[u8],
+    ) -> Result<(), EncodingError> {
+        serialize(cmd, writer, hmac_key).await
+    }
+
+    pub async fn serialize_client_response(
+        cmd: &ClientCommandResponse,
+        writer: &mut (dyn AsyncWrite + Send + Unpin),
+        hmac_key: &[u8],
+    ) -> Result<(), EncodingError> {
+        serialize(cmd, writer, hmac_key).await
     }
 }
 
