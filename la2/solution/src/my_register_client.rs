@@ -66,7 +66,6 @@ impl RegisterClient for MyRegisterClient {
     }
 }
 
-// pub async fn init_registers(client: Arc<MyRegisterClient>) -> Vec<MyAtomicRegister> {
 pub async fn init_registers(client: Arc<MyRegisterClient>) {
     let sectors_manager = Arc::new(
         MySectorsManager::new(
@@ -74,21 +73,12 @@ pub async fn init_registers(client: Arc<MyRegisterClient>) {
         ).await
     );
 
-    // let mut registers = Vec::with_capacity(client.n_sectors as usize);
     let mut cmd_senders = Vec::with_capacity(client.n_sectors as usize);
-    // let mut client_cmd_senders = Vec::with_capacity(client.n_sectors as usize);
-    // let mut system_cmd_senders = Vec::with_capacity(client.n_sectors as usize);
 
     for sector_idx in 0..client.n_sectors {
         // TODO: revisit channel capacity
         let (tx, mut rx) = tokio::sync::mpsc::channel::<RegisterCommand>(1000);
         cmd_senders.push(tx);
-
-        // let (client_tx, mut client_rx) = tokio::sync::mpsc::channel::<RegisterCommand>(1000);
-        // client_cmd_senders.push(client_tx);
-
-        // let (system_tx, mut system_rx) = tokio::sync::mpsc::channel::<RegisterCommand>(1000);
-        // system_cmd_senders.push(system_tx);
 
         let client = client.clone();
         let sectors_manager = sectors_manager.clone();
@@ -102,24 +92,6 @@ pub async fn init_registers(client: Arc<MyRegisterClient>) {
                 client.tcp_locations.len() as u8
             ).await;
 
-            // loop {
-            //     tokio::select! {
-            //         biased;
-            //         Some(cmd) = client_rx.recv() => {
-            //             register.client_command(match cmd {
-            //                 RegisterCommand::Client(c) => c,
-            //                 _ => panic!("Expected client command"),
-            //             }).await;
-            //         },
-            //         Some(cmd) = system_rx.recv() => {
-            //             register.system_command(match cmd {
-            //                 RegisterCommand::System(s) => s,
-            //                 _ => panic!("Expected system command"),
-            //             }).await;
-            //         }
-            //     }
-            // }
-
             while let Some(recv_cmd) = rx.recv().await {
                 match recv_cmd {
                     RegisterCommand::Client(cmd) => {
@@ -131,6 +103,11 @@ pub async fn init_registers(client: Arc<MyRegisterClient>) {
                             Box::pin(async move {
                                 println!("Received response: {:?}", response.status);
                                 // this AR is ready to handle next command
+                                // TODO: send the response back to the client (via TCP)
+                                // the queue should be a tuple (client_addr, RegisterCommand)
+                                // and we should use RegisterClient to send the response
+                                // idk if it is feasible to use it inside a callback
+                                // so maybe we could do it after the callback 
                             })
                         });
                         register.client_command(cmd, success_callback).await;
@@ -141,7 +118,5 @@ pub async fn init_registers(client: Arc<MyRegisterClient>) {
                 }
             }
         });
-        // registers.push(register);
     }
-    // registers
 }
