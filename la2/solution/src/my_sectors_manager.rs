@@ -43,6 +43,8 @@ impl MySectorsManager {
     // }
 
     pub async fn get_filename_from_idx(&self, search_idx: SectorIdx) -> Option<String> {
+        // not sure why I abandoned the in memory idx->filename map approach
+        // TODO: revisit later
         let mut dir_entries = read_dir(&self.path).await.unwrap();
         // let dir: File = File::open(&self.path).await.unwrap();
 
