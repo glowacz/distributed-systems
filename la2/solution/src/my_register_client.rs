@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use log::{error, info};
 use tokio::net::tcp::{OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
 use crate::{ClientCommandResponse, serialize_client_response};
 use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, my_atomic_register::MyAtomicRegister, my_sectors_manager::MySectorsManager, register_client_public, serialize_register_command};
@@ -81,7 +82,8 @@ impl RegisterClient for MyRegisterClient {
     }
 }
 
-pub fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, sector_idx: u64, mut rx: tokio::sync::mpsc::Receiver<RegisterCommand>) {
+pub fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, sector_idx: u64, 
+                mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<OwnedWriteHalf>)>) {
     // let client = client.clone();
     // let sectors_manager = sectors_manager.clone();
 
@@ -92,38 +94,124 @@ pub fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsMana
         let mut register = MyAtomicRegister::new(
             client.self_rank,
             sector_idx,
-            // client.clone(),
-            client,
+            client.clone(),
+            // client,
             // sectors_manager.clone(),
             sectors_manager,
             n
         ).await;
 
-        while let Some(recv_cmd) = rx.recv().await {
+        while let Some((recv_cmd, maybe_writer)) = rx.recv().await {
             match recv_cmd {
+                RegisterCommand::System(cmd) => {
+                    // Handle system commands that might arrive when no Client is active
+                    register.system_command(cmd).await;
+                },
                 RegisterCommand::Client(cmd) => {
+                    // 1. Prepare the Client Command
+                    let tcp_writer = match maybe_writer {
+                        Some(w) => w,
+                        None => {
+                            error!("Client command missing TCP writer");
+                            continue;
+                        }
+                    };
+
+                    let client_clone = client.clone();
+                    let (tx_done, mut rx_done) = oneshot::channel();
+
                     let success_callback: Box<
                         dyn FnOnce(ClientCommandResponse) -> Pin<Box<dyn Future<Output = ()> + Send>>
                             + Send
                             + Sync,
-                    > = Box::new(|response: ClientCommandResponse| {
+                    > = Box::new(move |response: ClientCommandResponse| {
                         Box::pin(async move {
-                            println!("Received response: {:?}", response.status);
-                            // this AR is ready to handle next command
-                            // TODO: send the response back to the client (via TCP)
-                            // the queue should be a tuple (client_addr, RegisterCommand)
-                            // and we should use RegisterClient to send the response
-                            // idk if it is feasible to use it inside a callback
-                            // so maybe we could do it after the callback 
+                            // Reply to client
+                            client_clone.reply_to_client(Arc::new(response), tcp_writer).await;
+                            // Signal completion
+                            let _ = tx_done.send(());
                         })
                     });
+
+                    // 2. Start the operation
                     register.client_command(cmd, success_callback).await;
-                },
-                RegisterCommand::System(cmd) => {
-                    register.system_command(cmd).await;
-                },
+
+                    // 3. INNER LOOP: Process System commands UNTIL callback finishes
+                    loop {
+                        tokio::select! {
+                            // BRANCH A: The callback finished.
+                            _ = &mut rx_done => {
+                                info!("[{}]: Client command finished via callback.", client.self_rank);
+                                break; // Exit Inner Loop, go back to Outer Loop
+                            }
+
+                            // BRANCH B: Incoming messages from the queue
+                            msg = rx.recv() => {
+                                match msg {
+                                    Some((RegisterCommand::System(sys_cmd), _)) => {
+                                        // Crucial: Process system cmd to advance state
+                                        register.system_command(sys_cmd).await;
+                                    }
+                                    Some((RegisterCommand::Client(_), _)) => {
+                                        // Error: We received a NEW client command while the previous 
+                                        // one is still pending. 
+                                        // Depending on requirements: Buffer it, Panic, or Log Error.
+                                        error!("Protocol Error: Received new Client command while previous one is pending!");
+                                    }
+                                    None => {
+                                        // Channel closed (application shutting down)
+                                        return; 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
+        //     match recv_cmd {
+        //         RegisterCommand::Client(cmd) => {
+        //             // let tcp_writer_clone = tcp_writer.clone();
+        //             let tcp_writer = match writer_opt {
+        //                 Some(w) => w,
+        //                 None => {
+        //                     // error!("Client command received without TCP writer!");
+        //                     continue;
+        //                 }
+        //             };
+        //             let client_clone = client.clone();                    
+        //             let (tx_done, rx_done) = oneshot::channel();
+
+        //             let success_callback: Box<
+        //                 dyn FnOnce(ClientCommandResponse) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        //                     + Send
+        //                     + Sync,
+        //             > = Box::new(|response: ClientCommandResponse| {
+        //                 Box::pin(async move {
+        //                     println!("Received response: {:?}", response.status);
+        //                     // this AR is ready to handle next client command if there is one
+        //                     // or if there is none, this AR task should finish
+        //                     // TODO: send the response back to the client (via TCP)
+        //                     // the queue should be a tuple (client_addr, RegisterCommand)
+        //                     // and we should use RegisterClient to send the response
+        //                     // idk if it is feasible to use it inside a callback
+        //                     // so maybe we could do it after the callback
+        //                     client_clone.reply_to_client(Arc::new(response), tcp_writer).await;
+        //                     let _ = tx_done.send(());
+        //                 })
+        //             });
+        //             register.client_command(cmd, success_callback).await;
+        //             info!("[{}]: finished CLIENT command for sector {}", client.self_rank, sector_idx);
+        //         },
+        //         RegisterCommand::System(cmd) => {
+        //             register.system_command(cmd).await;
+        //             info!("[{}]: finished SYSTEM command for sector {}", client.self_rank, sector_idx);
+        //         },
+        //     }
+        // }
+        info!("[{}]: finished all commands for sector {}", client.self_rank, sector_idx);
     });
 
     // TODO: remove the tx from hashmap when the task ends
@@ -160,10 +248,9 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
 
             // let cmd_senders = cmd_senders.clone();
 
-            // let (recv_cmd, hmac_valid) = crate::deserialize_register_command(&mut tcp_stream, &hmac_system_key).await.unwrap();
-            let deserialize_res = crate::deserialize_register_command(&mut rd, &hmac_system_key, &client_hmac_key).await;
-            // info!("[{}:{}]: Deserialized message with SYSTEM hmac, result {:?}", self_addr.0, self_addr.1, deserialize_res);
-            info!("[{}:{}]: Deserialized message with SYSTEM hmac", self_addr.0, self_addr.1);
+            let deserialize_res = crate::deserialize_register_command(&mut rd, &hmac_system_key, &hmac_client_key).await;
+            // info!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
+            info!("[{}:{}]: Deserialized message", self_addr.0, self_addr.1);
             match deserialize_res {
                 Ok((recv_cmd, hmac_valid)) => {
                     match recv_cmd {
@@ -171,22 +258,38 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                             if !hmac_valid {
                                 error!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, ignoring. The command: {:?}",
                                  self_addr.0, self_addr.1, cmd);
-                                return;
+                                drop(rd);
+                                drop(wr);
+                                continue;
                             }
+
                             info!("[{}:{}]: Received valid SYSTEM command {:?}",
                                  self_addr.0, self_addr.1, cmd);
                             let sector_idx = cmd.header.sector_idx;
+                            // the rx_opt is Option (bc it might not be in map) 
+                            // of (<Sender<(RegisterCommand, Option<OwnedWriteHalf>)>>, Option<Receiver<...
+                            // so, in the map we keep a tx, and potentially rx, of the queue communicating with AR
+                            // in the queue, we send pair (RegisterCommand, Option<OwnedWriteHalf>)
+                            // Option<OwnedWriteHalf> is for writing a reply to the client
+                            // it is an Option, since when sending System commands, 
+                            // we won't provide any OwnedWriteHalf for writing a reply
+
                             let (tx, rx_opt) = match cmd_senders.get(&sector_idx) {
                                 None => { // though with system messages we should already have a running task
                                     // (with corresponding tx and rx)
                                     // TODO: revisit channel capacity
-                                    let (tx, rx) = tokio::sync::mpsc::channel::<RegisterCommand>(1000);
+                                    let (tx, rx) = 
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
+                                    // keeping wr in cmd_senders map doesn't make sense
+                                    // as there may be many clients requesting operations on this sector
+                                    // an insert() like this stores only the latest wr
+                                    // but generally, this wr should (is) just be sent via queue with the client command
                                     cmd_senders.insert(sector_idx, tx.clone());
-                                    (&tx.clone(), Some(rx))
+                                    (tx.clone(), Some(rx))
                                 },
-                                Some(s) => (s, None)
+                                Some(tx) => (tx.clone(), None)
                             };
-                            tx.send(RegisterCommand::System(cmd)).await.unwrap();
+                            tx.send((RegisterCommand::System(cmd), None)).await.unwrap();
                             if let Some(rx) = rx_opt {
                                 ar_task(
                                     client.clone(),
@@ -196,51 +299,23 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                                 );
                             }
                         },
-                        RegisterCommand::Client(_cmd) => {
-                            info!("[{}:{}]: Received CLIENT command but checking with SYSTEM hmac, ignoring...\nThe command: {:?}",
-                                 self_addr.0, self_addr.1, _cmd);
-                            // ignore, when getting a good client command we will be able to deserialize it,
-                            // just the hmac should be invalid with SYSTEM key
-                            // this command will be handled when checking with client key below
-                        }
-                    }
-                },
-                Err(e) => {
-                    error!("Could not deserialize SYSTEM command: {:?}", e);
-                    return;
-                },
-                
-            }
-
-            info!("[{}:{}]: Before deserializing message with CLIENT hmac", self_addr.0, self_addr.1);
-            let deserialize_res = crate::deserialize_register_command_from_client(&mut rd, &hmac_client_key).await;
-            // info!("[{}:{}]: Deserialized message with CLIENT hmac, result {:?}", self_addr.0, self_addr.1, deserialize_res);
-            info!("[{}:{}]: Deserialized message with CLIENT hmac", self_addr.0, self_addr.1);
-
-            match deserialize_res {
-                Ok((recv_cmd, hmac_valid)) => {
-                    match recv_cmd {
-                        RegisterCommand::System(_cmd) => {
-                            info!("[{}:{}]: Received SYSTEM command but checking with CLIENT hmac, ignoring...\nThe command: {:?}",
-                                 self_addr.0, self_addr.1, _cmd);
-                            // ignore, when getting a good system command we will be able to deserialize it,
-                            // just the hmac should be invalid with CLIENT key
-                            // this command was handled when checking with system key above
-                        },
                         RegisterCommand::Client(cmd) => {
                             if !hmac_valid {
                                 error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
                                  self_addr.0, self_addr.1, cmd);
-                                let reply_cmd = Arc::new(
-                                    ClientCommandResponse { 
-                                        status: crate::StatusCode::AuthFailure, 
-                                        request_identifier: cmd.header.request_identifier,
-                                        op_return: crate::OperationReturn::Write
-                                    }
-                                );
-                                client.reply_to_client(reply_cmd, wr).await;
-                                return;
+                                // let reply_cmd = Arc::new(
+                                //     ClientCommandResponse { 
+                                //         status: crate::StatusCode::AuthFailure, 
+                                //         request_identifier: cmd.header.request_identifier,
+                                //         op_return: crate::OperationReturn::Write
+                                //     }
+                                // );
+                                // client.reply_to_client(reply_cmd, wr).await;
+                                drop(rd);
+                                drop(wr);
+                                continue;
                             }
+
                             info!("[{}:{}]: Received valid CLIENT command from {}\nCommand:{:?}",
                                  self_addr.0, self_addr.1, _client_addr, cmd);
                             let sector_idx = cmd.header.sector_idx;
@@ -248,26 +323,28 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                                 None => { // though with system messages we should already have a running task
                                     // (with corresponding tx and rx)
                                     // TODO: revisit channel capacity
-                                    let (tx, rx) = tokio::sync::mpsc::channel::<RegisterCommand>(1000);
+                                    let (tx, rx) = 
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
                                     cmd_senders.insert(sector_idx, tx.clone());
                                     (&tx.clone(), Some(rx))
                                 },
-                                Some(s) => (s, None)
+                                Some(tx) => (tx, None)
                             };
-                            tx.send(RegisterCommand::Client(cmd)).await.unwrap();
+                            tx.send((RegisterCommand::Client(cmd), Some(wr))).await.unwrap();
+                            // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
                                 ar_task(
                                     client.clone(),
                                     sectors_manager.clone(),
                                     sector_idx,
-                                    rx
+                                    rx,
                                 );
                             }
                         }
                     }
                 },
                 Err(e) => {
-                    error!("Could not deserialize CLIENT command: {:?}", e);
+                    error!("Could not deserialize SYSTEM command: {:?}", e);
                     return;
                 },
                 
