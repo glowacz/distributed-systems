@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::{path::PathBuf, sync::Arc};
 
 use log::{error, info};
 use tokio::net::tcp::{OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::select;
 
 use crate::{ClientCommandResponse, serialize_client_response};
 use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, my_atomic_register::MyAtomicRegister, my_sectors_manager::MySectorsManager, register_client_public, serialize_register_command};
@@ -23,7 +22,7 @@ pub struct MyRegisterClient {
 
 impl MyRegisterClient {
     pub fn new(conf: Configuration) -> Self {
-        Self { 
+        Self {
             hmac_system_key: conf.hmac_system_key,
             hmac_client_key: conf.hmac_client_key,
             tcp_locations: conf.public.tcp_locations,
@@ -82,140 +81,95 @@ impl RegisterClient for MyRegisterClient {
     }
 }
 
-pub fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, sector_idx: u64, 
-                mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<OwnedWriteHalf>)>) {
+pub async fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, sector_idx: u64, 
+                mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<OwnedWriteHalf>)>,
+                tx: tokio::sync::mpsc::Sender<(RegisterCommand, Option<OwnedWriteHalf>)>,
+                mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<OwnedWriteHalf>)>
+                ) {
     // let client = client.clone();
     // let sectors_manager = sectors_manager.clone();
+    
+    let mut processing_client = false;
+    let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(1000);
 
-    tokio::spawn( async move {
-        info!("[{}]: Starting AR task for sector {}", client.self_rank, sector_idx);
+    // if there is sth on client queue, start by moving it to main queue
+    let res = client_rx.try_recv();
+    if let Ok((recv_cmd, writer_opt)) = res {
+        let _ = tx.send((recv_cmd, writer_opt)).await;
+    }
 
-        let n = client.tcp_locations.len() as u8;
-        let mut register = MyAtomicRegister::new(
-            client.self_rank,
-            sector_idx,
-            client.clone(),
-            // client,
-            // sectors_manager.clone(),
-            sectors_manager,
-            n
-        ).await;
+    info!("[{}]: Starting AR task for sector {}", client.self_rank, sector_idx);
 
-        while let Some((recv_cmd, maybe_writer)) = rx.recv().await {
-            match recv_cmd {
-                RegisterCommand::System(cmd) => {
-                    // Handle system commands that might arrive when no Client is active
-                    register.system_command(cmd).await;
-                },
-                RegisterCommand::Client(cmd) => {
-                    // 1. Prepare the Client Command
-                    let tcp_writer = match maybe_writer {
-                        Some(w) => w,
-                        None => {
-                            error!("Client command missing TCP writer");
-                            continue;
-                        }
-                    };
+    let n = client.tcp_locations.len() as u8;
+    let mut register = MyAtomicRegister::new(
+        client.self_rank,
+        sector_idx,
+        client.clone(),
+        // client,
+        // sectors_manager.clone(),
+        sectors_manager,
+        n
+    ).await;
 
-                    let client_clone = client.clone();
-                    let (tx_done, mut rx_done) = oneshot::channel();
-
-                    let success_callback: Box<
-                        dyn FnOnce(ClientCommandResponse) -> Pin<Box<dyn Future<Output = ()> + Send>>
-                            + Send
-                            + Sync,
-                    > = Box::new(move |response: ClientCommandResponse| {
-                        Box::pin(async move {
-                            // Reply to client
-                            client_clone.reply_to_client(Arc::new(response), tcp_writer).await;
-                            // Signal completion
-                            let _ = tx_done.send(());
-                        })
-                    });
-
-                    // 2. Start the operation
-                    register.client_command(cmd, success_callback).await;
-
-                    // 3. INNER LOOP: Process System commands UNTIL callback finishes
-                    loop {
-                        tokio::select! {
-                            // BRANCH A: The callback finished.
-                            _ = &mut rx_done => {
-                                info!("[{}]: Client command finished via callback.", client.self_rank);
-                                break; // Exit Inner Loop, go back to Outer Loop
+    // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
+    loop {
+        select! {
+            Some((recv_cmd, writer_opt)) = rx.recv() => {
+                match recv_cmd {
+                    RegisterCommand::Client(cmd) => {
+                        processing_client = true;
+                        // let tcp_writer_clone = tcp_writer.clone();
+                        let tcp_writer = match writer_opt {
+                            Some(w) => w,
+                            None => {
+                                // error!("Client command received without TCP writer!");
+                                continue;
                             }
-
-                            // BRANCH B: Incoming messages from the queue
-                            msg = rx.recv() => {
-                                match msg {
-                                    Some((RegisterCommand::System(sys_cmd), _)) => {
-                                        // Crucial: Process system cmd to advance state
-                                        register.system_command(sys_cmd).await;
-                                    }
-                                    Some((RegisterCommand::Client(_), _)) => {
-                                        // Error: We received a NEW client command while the previous 
-                                        // one is still pending. 
-                                        // Depending on requirements: Buffer it, Panic, or Log Error.
-                                        error!("Protocol Error: Received new Client command while previous one is pending!");
-                                    }
-                                    None => {
-                                        // Channel closed (application shutting down)
-                                        return; 
-                                    }
-                                }
-                            }
-                        }
-                    }
+                        };
+                        let client_clone = client.clone();                    
+                        let tx_client_done_clone = tx_client_done.clone();
+    
+                        let success_callback: Box<
+                            dyn FnOnce(ClientCommandResponse) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                                + Send
+                                + Sync,
+                        > = Box::new(|response: ClientCommandResponse| {
+                            Box::pin(async move {
+                                info!("Callback will send response: {:?}", response.status);
+                                client_clone.reply_to_client(Arc::new(response), tcp_writer).await;
+                                let _ = tx_client_done_clone.send(());
+                            })
+                        });
+                        register.client_command(cmd, success_callback).await;
+                        info!("[{}]: finished CLIENT command for sector {}", client.self_rank, sector_idx);
+                    },
+                    RegisterCommand::System(cmd) => {
+                        register.system_command(cmd).await;
+                        info!("[{}]: finished SYSTEM command for sector {}", client.self_rank, sector_idx);
+                    },
                 }
+            }
+            _ = rx_client_done.recv() => {
+                info!("[{}]: finished processing whole CLIENT request for sector {}", client.self_rank, sector_idx);
+                processing_client = false;
+            }
+        }
+        
+        // check if we're processing client request and if there is sth on client queue
+        // if NO and YES, move the request from client to main queue
+        if !processing_client {
+            let res = client_rx.try_recv();
+            if let Ok((recv_cmd, writer_opt)) = res {
+                info!("[{}]: adding new CLIENT request for sector {} to main queue", client.self_rank, sector_idx);
+                let _ = tx.send((recv_cmd, writer_opt)).await;
             }
         }
 
-        // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
-        //     match recv_cmd {
-        //         RegisterCommand::Client(cmd) => {
-        //             // let tcp_writer_clone = tcp_writer.clone();
-        //             let tcp_writer = match writer_opt {
-        //                 Some(w) => w,
-        //                 None => {
-        //                     // error!("Client command received without TCP writer!");
-        //                     continue;
-        //                 }
-        //             };
-        //             let client_clone = client.clone();                    
-        //             let (tx_done, rx_done) = oneshot::channel();
-
-        //             let success_callback: Box<
-        //                 dyn FnOnce(ClientCommandResponse) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        //                     + Send
-        //                     + Sync,
-        //             > = Box::new(|response: ClientCommandResponse| {
-        //                 Box::pin(async move {
-        //                     println!("Received response: {:?}", response.status);
-        //                     // this AR is ready to handle next client command if there is one
-        //                     // or if there is none, this AR task should finish
-        //                     // TODO: send the response back to the client (via TCP)
-        //                     // the queue should be a tuple (client_addr, RegisterCommand)
-        //                     // and we should use RegisterClient to send the response
-        //                     // idk if it is feasible to use it inside a callback
-        //                     // so maybe we could do it after the callback
-        //                     client_clone.reply_to_client(Arc::new(response), tcp_writer).await;
-        //                     let _ = tx_done.send(());
-        //                 })
-        //             });
-        //             register.client_command(cmd, success_callback).await;
-        //             info!("[{}]: finished CLIENT command for sector {}", client.self_rank, sector_idx);
-        //         },
-        //         RegisterCommand::System(cmd) => {
-        //             register.system_command(cmd).await;
-        //             info!("[{}]: finished SYSTEM command for sector {}", client.self_rank, sector_idx);
-        //         },
-        //     }
-        // }
-        info!("[{}]: finished all commands for sector {}", client.self_rank, sector_idx);
-    });
-
+    }
     // TODO: remove the tx from hashmap when the task ends
     // and maybe should join the task handle
+    // BUT FOR NOW DON'T END THE TASK (IT HAS INFINITE LOOP 
+    // AND NO BREAKABLE (TCP) CONNECTIONS, IT WON'T END)
 }
 
 pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u16), storage_dir: PathBuf) {
@@ -227,7 +181,8 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
 
     let hmac_client_key = client.hmac_client_key;
     let hmac_system_key = client.hmac_system_key;
-    let mut cmd_senders = HashMap::new();
+    let mut main_cmd_senders = HashMap::new();
+    let mut client_cmd_senders = HashMap::new();
 
     info!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
 
@@ -246,7 +201,7 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
 
             // let writer = Arc::new(tokio::sync::Mutex::new(wr));
 
-            // let cmd_senders = cmd_senders.clone();
+            // let main_cmd_senders = main_cmd_senders.clone();
 
             let deserialize_res = crate::deserialize_register_command(&mut rd, &hmac_system_key, &hmac_client_key).await;
             // info!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
@@ -274,30 +229,73 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                             // it is an Option, since when sending System commands, 
                             // we won't provide any OwnedWriteHalf for writing a reply
 
-                            let (tx, rx_opt) = match cmd_senders.get(&sector_idx) {
-                                None => { // though with system messages we should already have a running task
-                                    // (with corresponding tx and rx)
+                            // regardless of whether the map has a client queue, 
+                            // we should check if the map has the main queue, 
+                            // as this determines the task
+                            let (tx, rx_opt) = match main_cmd_senders.get(&sector_idx) {
+                                None => {
                                     // TODO: revisit channel capacity
                                     let (tx, rx) = 
                                         tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
-                                    // keeping wr in cmd_senders map doesn't make sense
-                                    // as there may be many clients requesting operations on this sector
-                                    // an insert() like this stores only the latest wr
-                                    // but generally, this wr should (is) just be sent via queue with the client command
-                                    cmd_senders.insert(sector_idx, tx.clone());
+                                    main_cmd_senders.insert(sector_idx, tx.clone());
                                     (tx.clone(), Some(rx))
                                 },
                                 Some(tx) => (tx.clone(), None)
                             };
+                            
+                            // get or create the client queue
+                            let (_client_tx, client_rx_opt) = match client_cmd_senders.get(&sector_idx) {
+                                None => {
+                                    // TODO: revisit channel capacity
+                                    let (client_tx, client_rx) = 
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
+                                        client_cmd_senders.insert(sector_idx, client_tx.clone());
+                                    (&client_tx.clone(), Some(client_rx))
+                                },
+                                Some(client_tx) => (client_tx, None)
+                            };
+
                             tx.send((RegisterCommand::System(cmd), None)).await.unwrap();
+                            // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
-                                ar_task(
-                                    client.clone(),
-                                    sectors_manager.clone(),
-                                    sector_idx,
-                                    rx
-                                );
+                                if let Some(client_rx) = client_rx_opt {
+                                    // for moving into tokio task
+                                    let client = client.clone();
+                                    let sectors_manager = sectors_manager.clone();
+
+                                    let _ = tokio::spawn( async move {
+                                        ar_task(
+                                            client,
+                                            sectors_manager,
+                                            sector_idx,
+                                            rx,
+                                            tx.clone(),
+                                            client_rx
+                                        )
+                                    });
+                                }
                             }
+
+                            // let (tx, rx_opt) = match main_cmd_senders.get(&sector_idx) {
+                            //     None => {
+                            //         // TODO: revisit channel capacity
+                            //         let (tx, rx) = 
+                            //             tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
+                            //         main_cmd_senders.insert(sector_idx, tx.clone());
+                            //         (tx.clone(), Some(rx))
+                            //     },
+                            //     Some(tx) => (tx.clone(), None)
+                            // };
+                            // tx.send((RegisterCommand::System(cmd), None)).await.unwrap();
+                            // if let Some(rx) = rx_opt {
+                            //     ar_task(
+                            //         client.clone(),
+                            //         sectors_manager.clone(),
+                            //         sector_idx,
+                            //         rx,
+                            //         tx.clone()
+                            //     );
+                            // }
                         },
                         RegisterCommand::Client(cmd) => {
                             if !hmac_valid {
@@ -319,26 +317,52 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                             info!("[{}:{}]: Received valid CLIENT command from {}\nCommand:{:?}",
                                  self_addr.0, self_addr.1, _client_addr, cmd);
                             let sector_idx = cmd.header.sector_idx;
-                            let (tx, rx_opt) = match cmd_senders.get(&sector_idx) {
-                                None => { // though with system messages we should already have a running task
-                                    // (with corresponding tx and rx)
+
+                            // regardless of whether the map has a client queue, 
+                            // we should check if the map has the main queue, 
+                            // as this determines the task
+                            let (tx, rx_opt) = match main_cmd_senders.get(&sector_idx) {
+                                None => {
                                     // TODO: revisit channel capacity
                                     let (tx, rx) = 
                                         tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
-                                    cmd_senders.insert(sector_idx, tx.clone());
-                                    (&tx.clone(), Some(rx))
+                                    main_cmd_senders.insert(sector_idx, tx.clone());
+                                    (tx.clone(), Some(rx))
                                 },
-                                Some(tx) => (tx, None)
+                                Some(tx) => (tx.clone(), None)
                             };
-                            tx.send((RegisterCommand::Client(cmd), Some(wr))).await.unwrap();
+                            
+                            // get or create the client queue
+                            let (client_tx, client_rx_opt) = match client_cmd_senders.get(&sector_idx) {
+                                None => {
+                                    // TODO: revisit channel capacity
+                                    let (client_tx, client_rx) = 
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<OwnedWriteHalf>)>(1000);
+                                        client_cmd_senders.insert(sector_idx, client_tx.clone());
+                                    (&client_tx.clone(), Some(client_rx))
+                                },
+                                Some(client_tx) => (client_tx, None)
+                            };
+
+                            client_tx.send((RegisterCommand::Client(cmd), Some(wr))).await.unwrap();
                             // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
-                                ar_task(
-                                    client.clone(),
-                                    sectors_manager.clone(),
-                                    sector_idx,
-                                    rx,
-                                );
+                                if let Some(client_rx) = client_rx_opt{
+                                    // for moving into tokio task
+                                    let client = client.clone();
+                                    let sectors_manager = sectors_manager.clone();
+
+                                    let _ = tokio::spawn( async move {
+                                        ar_task(
+                                            client,
+                                            sectors_manager,
+                                            sector_idx,
+                                            rx,
+                                            tx.clone(),
+                                            client_rx
+                                        )
+                                    });
+                                }
                             }
                         }
                     }
