@@ -274,7 +274,7 @@ impl Raft {
 impl Handler<Init> for Raft {
     async fn handle(&mut self, _msg: Init) {
         if self.enabled {
-            log::info!("[{}, {:?}]: got INIT", self.config.self_id, self.process_type);
+            // log::info!("[{}, {:?}]: got INIT", self.config.self_id, self.process_type);
             self.reset_timer(self.config.election_timeout).await;
         }
     }
@@ -285,7 +285,7 @@ impl Handler<Init> for Raft {
 impl Handler<Timeout> for Raft {
     async fn handle(&mut self, _: Timeout) {
         if self.enabled {
-            log::info!("[{}, {:?}]: got TIMEOUT", self.config.self_id, self.process_type);
+            // log::info!("[{}, {:?}]: got TIMEOUT", self.config.self_id, self.process_type);
             match &mut self.process_type {
                 ProcessType::Follower => {
                     // become candidante, increment term and start election
@@ -312,7 +312,7 @@ impl Handler<Timeout> for Raft {
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
         if self.enabled {
-            log::info!("[{}, {:?}]: got message: {:?}", self.config.self_id, self.process_type, msg);
+            // log::info!("[{}, {:?}]: got message: {:?}", self.config.self_id, self.process_type, msg);
             // Reset the term and become a follower if we're outdated:
             self.check_for_higher_term(&msg);
             // Received term is (from now on) <= our term
@@ -354,7 +354,6 @@ impl Handler<Disable> for Raft {
 }
 
 /// State of a Raft process with a corresponding (volatile) information.
-#[derive(Debug)]
 #[derive(Default)]
 enum ProcessType {
     #[default]
