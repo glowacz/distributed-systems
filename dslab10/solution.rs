@@ -184,7 +184,7 @@ impl Raft {
         let mut votes = HashSet::new();
         votes.insert(self.config.self_id);
 
-        self.process_type = ProcessType::Candidate { 
+        self.process_type = ProcessType::Candidate {
             votes_received: votes
         };
         self.state.voted_for = Some(self.config.self_id);
@@ -242,7 +242,8 @@ impl Raft {
     async fn handle_request_vote(&mut self, candidate_id: Uuid, term: u64) {
         if term >= self.state.current_term && self.state.voted_for == None {
             self.state.voted_for = Some(candidate_id);
-            self.sender.broadcast(
+            self.sender.send(
+                &candidate_id,
                 RaftMessage { 
                     header: RaftMessageHeader { 
                         term: self.state.current_term 
@@ -255,7 +256,8 @@ impl Raft {
             ).await;
         }
         else {
-            self.sender.broadcast(
+            self.sender.send(
+                &candidate_id,
                 RaftMessage { 
                     header: RaftMessageHeader { 
                         term: self.state.current_term 
@@ -329,7 +331,7 @@ impl Handler<RaftMessage> for Raft {
                 }
                 (ProcessType::Candidate { votes_received }, 
                   RaftMessageContent::RequestVoteResponse { granted, source }) => {
-                    if granted {
+                    if granted && msg.header.term == self.state.current_term {
                         votes_received.insert(source);
 
                         if votes_received.len() > self.config.processes_count / 2 {
