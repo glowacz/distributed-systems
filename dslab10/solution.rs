@@ -104,6 +104,7 @@ impl Raft {
         storage: Box<dyn StableStorage>,
         sender: Box<dyn Sender>,
     ) -> ModuleRef<Self> {
+        log::info!("CONSTRUCTING NEW RAFT MODULE {}", config.self_id);
         let state = storage.get().unwrap_or_default();
 
         let self_ref = system
@@ -169,6 +170,36 @@ impl Raft {
             .await;
     }
 
+    async fn start_election(&mut self) {
+        if self.config.processes_count <= 1 {
+            self.process_type = ProcessType::Leader;
+            self.state.voted_for = Some(self.config.self_id);
+            self.update_term(self.state.current_term + 1);
+            self.update_state();
+            
+            self.reset_timer(self.config.election_timeout / 10).await;
+            return;
+        }
+
+        let mut votes = HashSet::new();
+        votes.insert(self.config.self_id);
+
+        self.process_type = ProcessType::Candidate { 
+            votes_received: votes
+        };
+        self.state.voted_for = Some(self.config.self_id);
+
+        self.update_term(self.state.current_term + 1);
+        self.update_state();
+
+        self.sender.broadcast(
+          RaftMessage { 
+            header: RaftMessageHeader { term: self.state.current_term },
+            content: RaftMessageContent::RequestVote { candidate_id: self.config.self_id } 
+          }  
+        ).await;
+    }
+
     // -------------
     // Example implementation is given for the Heartbeat message
     // -------------
@@ -207,12 +238,43 @@ impl Raft {
             )
             .await;
     }
+
+    async fn handle_request_vote(&mut self, candidate_id: Uuid, term: u64) {
+        if term >= self.state.current_term && self.state.voted_for == None {
+            self.state.voted_for = Some(candidate_id);
+            self.sender.broadcast(
+                RaftMessage { 
+                    header: RaftMessageHeader { 
+                        term: self.state.current_term 
+                    }, 
+                    content: RaftMessageContent::RequestVoteResponse { 
+                        granted: true, 
+                        source: self.config.self_id 
+                    } 
+                }
+            ).await;
+        }
+        else {
+            self.sender.broadcast(
+                RaftMessage { 
+                    header: RaftMessageHeader { 
+                        term: self.state.current_term 
+                    }, 
+                    content: RaftMessageContent::RequestVoteResponse { 
+                        granted: false, 
+                        source: self.config.self_id 
+                    } 
+                }
+            ).await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl Handler<Init> for Raft {
     async fn handle(&mut self, _msg: Init) {
         if self.enabled {
+            log::info!("[{}, {:?}]: got INIT", self.config.self_id, self.process_type);
             self.reset_timer(self.config.election_timeout).await;
         }
     }
@@ -223,15 +285,23 @@ impl Handler<Init> for Raft {
 impl Handler<Timeout> for Raft {
     async fn handle(&mut self, _: Timeout) {
         if self.enabled {
+            log::info!("[{}, {:?}]: got TIMEOUT", self.config.self_id, self.process_type);
             match &mut self.process_type {
                 ProcessType::Follower => {
-                    unimplemented!();
+                    // become candidante, increment term and start election
+                    // vote for self and broadcast election
+                    self.start_election().await;
                 }
                 ProcessType::Candidate { .. } => {
-                    unimplemented!();
+                    // increment and start new election
+                    // didn't get majority of votes in old one
+                    // and didn't get heartbeat from leader 
+                    // (so we didn't convert to follower)
+                    self.start_election().await;
                 }
                 ProcessType::Leader => {
-                    unimplemented!();
+                    // send heartbeat ???
+                    self.broadcast_heartbeat().await;
                 }
             }
         }
@@ -242,17 +312,34 @@ impl Handler<Timeout> for Raft {
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
         if self.enabled {
+            log::info!("[{}, {:?}]: got message: {:?}", self.config.self_id, self.process_type, msg);
             // Reset the term and become a follower if we're outdated:
             self.check_for_higher_term(&msg);
-            // Received term is <= our term
+            // Received term is (from now on) <= our term
 
-            // TODO message specific processing. Heartbeat is given as an example:
             match (&mut self.process_type, msg.content) {
                 (_, RaftMessageContent::Heartbeat { leader_id }) => {
                     self.handle_heartbeat(leader_id, msg.header.term).await;
                 }
+                (_, RaftMessageContent::HeartbeatResponse) => {
+                    // probably do nothing, just means that some follower is alive
+                }
+                (_, RaftMessageContent::RequestVote { candidate_id }) => {
+                    self.handle_request_vote(candidate_id, self.state.current_term).await;
+                }
+                (ProcessType::Candidate { votes_received }, 
+                  RaftMessageContent::RequestVoteResponse { granted, source }) => {
+                    if granted {
+                        votes_received.insert(source);
+
+                        if votes_received.len() > self.config.processes_count / 2 {
+                            self.process_type = ProcessType::Leader;
+                            self.reset_timer(self.config.election_timeout / 10).await;
+                        }
+                    }
+                }
                 _ => {
-                    unimplemented!();
+                    // in other cases, do nothing
                 }
             }
         }
@@ -267,6 +354,7 @@ impl Handler<Disable> for Raft {
 }
 
 /// State of a Raft process with a corresponding (volatile) information.
+#[derive(Debug)]
 #[derive(Default)]
 enum ProcessType {
     #[default]
