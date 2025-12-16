@@ -1,3 +1,5 @@
 **/target/**
 *.zip
-*pg478969*
+**pg478969/**
+**/Cargo.lock
+
