@@ -142,3 +142,88 @@ pub enum OperationReturn {
     /// Response for `Write` command
     Write,
 }
+
+// TODO: delete this before sending
+use std::fmt;
+
+impl fmt::Display for RegisterCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegisterCommand::Client(cmd) => write!(f, "{}", cmd),
+            RegisterCommand::System(cmd) => write!(f, "{}", cmd),
+        }
+    }
+}
+
+impl fmt::Display for ClientRegisterCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ClientRegCmd {{ header: {}, content: {} }}",
+            self.header, self.content
+        )
+    }
+}
+
+impl fmt::Display for ClientCommandHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{{ request_identifier: {}, sector_idx: {} }}",
+            self.request_identifier, self.sector_idx
+        )
+    }
+}
+
+impl fmt::Display for ClientRegisterCommandContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read => write!(f, "Read"),
+            // Hiding the data field here
+            Self::Write { .. } => write!(f, "Write sth"),
+        }
+    }
+}
+
+impl fmt::Display for SystemRegisterCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SystemRegCmd {{ header: {:?}, content: {} }}",
+            self.header, self.content
+        )
+    }
+}
+
+impl fmt::Display for SystemCommandHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg_ident_last_part = self.msg_ident.as_bytes()[15];
+        write!(
+            f,
+            "{{ process_identifier: {}, msg_ident: {}, sector_idx: {} }}",
+            self.process_identifier, msg_ident_last_part, self.sector_idx
+        )
+    }
+}
+impl fmt::Display for SystemRegisterCommandContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadProc => write!(f, "ReadProc"),
+            Self::Value { timestamp, write_rank, .. } => {
+                write!(
+                    f,
+                    "Value {{ timestamp: {}, write_rank: {} }}",
+                    timestamp, write_rank
+                )
+            }
+            Self::WriteProc { timestamp, write_rank, .. } => {
+                write!(
+                    f,
+                    "WriteProc {{ timestamp: {}, write_rank: {}, data_to_write: <SectorVec> }}",
+                    timestamp, write_rank
+                )
+            }
+            Self::Ack => write!(f, "Ack"),
+        }
+    }
+}

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use log::info;
 use serde_big_array::Array;
 use uuid::Uuid;
 
@@ -109,8 +110,8 @@ impl AtomicRegister for MyAtomicRegister {
                 + Sync,
         >,
     ) {
-        // println!("Client command (is read? {:?}), sector {}, id {} triggered (on {})", 
-            // cmd.content == ClientRegisterCommandContent::Read, cmd.header.sector_idx, cmd.header.request_identifier, self.data.self_rank);
+        info!("[AR CLASS {}]: received CLIENT command {}", 
+          self.data.self_rank, cmd);
 
         self.data.op_id = Uuid::new_v4();
         self.data.readlist.clear();
@@ -145,6 +146,9 @@ impl AtomicRegister for MyAtomicRegister {
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
+        info!("[AR CLASS {}]: received SYSTEM command {}", 
+          self.data.self_rank, cmd);
+
         match cmd.content {
             SystemRegisterCommandContent::ReadProc => {
                 let command = SystemRegisterCommand {
@@ -159,11 +163,14 @@ impl AtomicRegister for MyAtomicRegister {
                         sector_data: self.data.val.clone()
                     }
                 };
+                info!("[AR CLASS {}]: BEFORE sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
                 self.client.send( 
                     crate::Send {
                         cmd: Arc::new(command),
                         target: cmd.header.process_identifier
                 }).await;
+                info!("[AR CLASS {}]: AFTER sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
+
             },
             SystemRegisterCommandContent::Value {
                 timestamp, 

@@ -75,8 +75,10 @@ impl RegisterClient for MyRegisterClient {
         // TODO skip TCP when sending to self
         // and maybe there just is a bettter way to send one/many messages
         for target in 1..=self.tcp_locations.len() as u8 {
-            let _ = self.send_msg(msg.cmd.clone(), target);
-            // don't await, just spawn the task (which will be a stubborn sender)
+            info!("[{}]: broadcast to target {}", self.self_rank, target);
+            // await the creation of the task so that it actually happens,
+            // (the finishing of the task is not awaited)
+            let _ = self.send_msg(msg.cmd.clone(), target).await;
         }
     }
 }
@@ -86,6 +88,7 @@ pub async fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySecto
                 tx: tokio::sync::mpsc::Sender<(RegisterCommand, Option<OwnedWriteHalf>)>,
                 mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<OwnedWriteHalf>)>
                 ) {
+    info!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
     // let client = client.clone();
     // let sectors_manager = sectors_manager.clone();
     
@@ -95,10 +98,10 @@ pub async fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySecto
     // if there is sth on client queue, start by moving it to main queue
     let res = client_rx.try_recv();
     if let Ok((recv_cmd, writer_opt)) = res {
+        info!("[{}]: Received command on client queue, piping to main",
+          client.self_rank);
         let _ = tx.send((recv_cmd, writer_opt)).await;
     }
-
-    info!("[{}]: Starting AR task for sector {}", client.self_rank, sector_idx);
 
     let n = client.tcp_locations.len() as u8;
     let mut register = MyAtomicRegister::new(
@@ -111,10 +114,13 @@ pub async fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySecto
         n
     ).await;
 
+    info!("[AR worker {}]: Starting LOOP for sector {}", client.self_rank, sector_idx);
+
     // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
     loop {
         select! {
             Some((recv_cmd, writer_opt)) = rx.recv() => {
+                info!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
                 match recv_cmd {
                     RegisterCommand::Client(cmd) => {
                         processing_client = true;
@@ -141,11 +147,11 @@ pub async fn ar_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySecto
                             })
                         });
                         register.client_command(cmd, success_callback).await;
-                        info!("[{}]: finished CLIENT command for sector {}", client.self_rank, sector_idx);
+                        info!("[[AR worker {}]: sent CLIENT command to AR struct for sector {}", client.self_rank, sector_idx);
                     },
                     RegisterCommand::System(cmd) => {
                         register.system_command(cmd).await;
-                        info!("[{}]: finished SYSTEM command for sector {}", client.self_rank, sector_idx);
+                        info!("[{}]: sent SYSTEM command for sector {}", client.self_rank, sector_idx);
                     },
                 }
             }
@@ -321,6 +327,8 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                             // regardless of whether the map has a client queue, 
                             // we should check if the map has the main queue, 
                             // as this determines the task
+                            // TODO: as deserialization and piping the command to AR worker
+                            // should happen in a new task, we will need mutex for the queues
                             let (tx, rx_opt) = match main_cmd_senders.get(&sector_idx) {
                                 None => {
                                     // TODO: revisit channel capacity
@@ -345,12 +353,18 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                             };
 
                             client_tx.send((RegisterCommand::Client(cmd), Some(wr))).await.unwrap();
+                            info!("[{}:{}]: Sent command onto the client queue",
+                              self_addr.0, self_addr.1);
+
                             // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
                                 if let Some(client_rx) = client_rx_opt{
                                     // for moving into tokio task
                                     let client = client.clone();
                                     let sectors_manager = sectors_manager.clone();
+
+                                    info!("[{}:{}]: Spawning a new client task",
+                                      self_addr.0, self_addr.1);
 
                                     let _ = tokio::spawn( async move {
                                         ar_task(
@@ -360,7 +374,7 @@ pub async fn init_registers(client: Arc<MyRegisterClient>, self_addr: (String, u
                                             rx,
                                             tx.clone(),
                                             client_rx
-                                        )
+                                        ).await;
                                     });
                                 }
                             }

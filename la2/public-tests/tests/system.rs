@@ -14,10 +14,15 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use std::io::Write;
+
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
         .filter_level(log::LevelFilter::Debug)
+        .format(|buf, record| {
+            writeln!(buf, "{}", record.args())
+        })
         .try_init();
 }
 
