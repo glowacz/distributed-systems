@@ -3,7 +3,7 @@ mod domain;
 use std::sync::Arc;
 
 pub use crate::domain::*;
-use crate::my_register_client::{MyRegisterClient, init_registers};
+use crate::my_register_client::{MyRegisterClient, start_tcp_server};
 pub use atomic_register_public::*;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
@@ -18,9 +18,9 @@ pub async fn run_register_process(config: Configuration) {
     let self_addr = config.public.tcp_locations[(config.public.self_rank - 1) as usize].clone();
     let storage_dir = config.public.storage_dir.clone();
 
-    let register_client = Arc::new(MyRegisterClient::new(config));
+    let register_client = Arc::new(MyRegisterClient::new(config).await);
     // this is not a tokio task, but it will spawn a task for each of its operations (send/broadcast)
-    let _ = init_registers(register_client, self_addr, storage_dir).await;
+    let _ = start_tcp_server(register_client, self_addr, storage_dir).await;
 }
 
 pub mod atomic_register_public {
