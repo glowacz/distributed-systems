@@ -19,7 +19,7 @@ use std::io::Write;
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Warn)
         .format(|buf, record| {
             writeln!(buf, "{}", record.args())
         })

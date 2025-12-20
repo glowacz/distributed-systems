@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info};
+use log::{error, info, warn};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
@@ -130,18 +130,18 @@ impl MyRegisterClient {
 #[async_trait::async_trait]
 impl RegisterClient for MyRegisterClient {
     async fn send(&self, msg: register_client_public::Send) {
-        let _ = self.send_msg(msg.cmd, msg.target); 
-        // don't await, just spawn the task (which will be a stubborn sender)
+        let _ = self.send_msg(msg.cmd, msg.target).await;
+        info!("[{}]: sending to target {}", self.self_rank, msg.target);
     }
 
     async fn broadcast(&self, msg: Broadcast) {
         // TODO skip TCP when sending to self
         // and maybe there just is a bettter way to send one/many messages
         for target in 1..=self.state.tcp_locations.len() as u8 {
-            info!("[{}]: broadcast to target {}", self.self_rank, target);
             // await the creation of the task so that it actually happens,
             // (the finishing of the task is not awaited)
             let _ = self.send_msg(msg.cmd.clone(), target).await;
+            info!("[{}]: broadcasting to target {}", self.self_rank, target);
         }
     }
 }
@@ -257,7 +257,8 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<MyS
     // AND NO BREAKABLE (TCP) CONNECTIONS, IT WON'T END)
 }
 
-async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, mut rd: OwnedReadHalf, peer_ip: String, peer_port: u16) { // reading from a single client/node
+async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, 
+    mut rd: OwnedReadHalf, client_ip: String, client_port: u16) { // reading from a single client/node
     let _ = tokio::spawn( async move {
         let self_addr = client.self_addr.clone();
         let state = client.state.clone();
@@ -274,6 +275,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                             if !hmac_valid {
                                 error!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
                                 self_addr.0, self_addr.1, cmd);
+                                let (peer_ip, peer_port) = client.state.tcp_locations[(cmd.header.process_identifier - 1) as usize].clone();
                                 let mut write_guard = state.tcp_writers.write().await;
                                 write_guard.remove(&(peer_ip.clone(), peer_port));
                                 // we don't want to talk with this guy anymore
@@ -281,7 +283,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 return;
                             }
 
-                            info!("[{}:{}]: Received valid SYSTEM command {:?}",
+                            info!("[{}:{}]: Received valid SYSTEM command {}",
                                 self_addr.0, self_addr.1, cmd);
                             let sector_idx = cmd.header.sector_idx;
                             // the rx_opt is Option (bc it might not be in map) 
@@ -342,14 +344,14 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 // );
                                 // client.reply_to_client(reply_cmd, wr).await;
                                 let mut write_guard = state.tcp_writers.write().await;
-                                write_guard.remove(&(peer_ip.clone(), peer_port));
+                                write_guard.remove(&(client_ip.clone(), client_port));
                                 // we don't want to talk with this guy anymore
                                 // (though we still allow him to connect again)
                                 return;
                             }
 
-                            info!("[{}:{}]: Received valid CLIENT command from ({},{})\nCommand:{}",
-                                self_addr.0, self_addr.1, peer_ip, peer_port, cmd);
+                            warn!("[{}:{}]: Received valid CLIENT command from ({},{})\nCommand:{}",
+                                self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
 
                             // regardless of whether the map has a client queue, 
@@ -382,7 +384,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 Some(client_tx) => (client_tx, None)
                             };
 
-                            client_tx.send((RegisterCommand::Client(cmd), Some((peer_ip.clone(), peer_port)))).await.unwrap();
+                            client_tx.send((RegisterCommand::Client(cmd), Some((client_ip.clone(), client_port)))).await.unwrap();
                             info!("[{}:{}]: Sent command onto the client queue",
                             self_addr.0, self_addr.1);
 
@@ -396,7 +398,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                     }
                 },
                 Err(e) => {
-                    error!("Could not deserialize SYSTEM command: {:?}", e);
+                    error!("[{}:{}]: Could not deserialize SYSTEM command: {:?}", self_addr.0, self_addr.1, e);
                     return;
                 },
                 
@@ -419,12 +421,10 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
 
         loop {
             let (socket, client_addr) = socket.accept().await.unwrap();
-            let (rd, wr) = socket.into_split();
-
             info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
-
+            
+            let (rd, wr) = socket.into_split();
             add_peer(client.state.clone(), client_addr, wr).await;
-
             start_tcp_reader_task(client.clone(), sectors_manager.clone(), rd, client_addr.ip().to_string(), client_addr.port()).await;
 
             

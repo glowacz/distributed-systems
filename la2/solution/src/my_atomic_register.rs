@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use log::info;
+use log::{debug, info, warn};
 use serde_big_array::Array;
 use uuid::Uuid;
 
@@ -163,7 +163,7 @@ impl AtomicRegister for MyAtomicRegister {
                         sector_data: self.data.val.clone()
                     }
                 };
-                info!("[AR CLASS {}]: BEFORE sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
+                // info!("[AR CLASS {}]: BEFORE sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
                 self.client.send( 
                     crate::Send {
                         cmd: Arc::new(command),
@@ -177,14 +177,18 @@ impl AtomicRegister for MyAtomicRegister {
                 write_rank, 
                 sector_data 
             } => {
-                if cmd.header.msg_ident != self.data.op_id || cmd.header.process_identifier == self.data.self_rank {
+                warn!("[AR CLASS {}]: got Value from {}", self.data.self_rank, cmd.header.process_identifier);
+                // if cmd.header.msg_ident != self.data.op_id || cmd.header.process_identifier == self.data.self_rank {
+                if cmd.header.msg_ident != self.data.op_id {
                     return;
                 }
                 self.data.readlist.insert(cmd.header.process_identifier, (timestamp, write_rank, sector_data));
+                info!("[AR CLASS {}]: inserted {} into readlist with (ts: {}, wr: {})", self.data.self_rank, 
+                    cmd.header.process_identifier, timestamp, write_rank);
 
-                if self.data.readlist.len() as u8 >= self.n / 2 && (self.data.reading || self.data.writing) {
+                if self.data.readlist.len() as u8 > self.n / 2 && (self.data.reading || self.data.writing) {
                      // >= because (ts, wr, val) from self is not in readlist
-                    self.data.readlist.insert(self.data.self_rank, (self.data.ts, self.data.wr, self.data.val.clone()));
+                    // self.data.readlist.insert(self.data.self_rank, (self.data.ts, self.data.wr, self.data.val.clone()));
                     let (maxts, rr, readval) = self.highest();
                     self.data.readlist.clear();
                     self.data.acklist.clear();
@@ -235,6 +239,8 @@ impl AtomicRegister for MyAtomicRegister {
                 write_rank, 
                 data_to_write 
             } => {
+                info!("[AR CLASS {}]: got WriteProc from {}", self.data.self_rank, cmd.header.process_identifier);
+
                 if (self.data.ts, self.data.wr) < (timestamp, write_rank) {
                     let (ts, wr, val) = (timestamp, write_rank, data_to_write);
                     self.store(ts, wr, &val).await;
@@ -255,14 +261,15 @@ impl AtomicRegister for MyAtomicRegister {
                 }).await;
             },
             SystemRegisterCommandContent::Ack => {
+                info!("[AR CLASS {}]: got Ack from {}", self.data.self_rank, cmd.header.process_identifier);
                 if cmd.header.msg_ident != self.data.op_id 
-                    || cmd.header.process_identifier == self.data.self_rank
+                    // || cmd.header.process_identifier == self.data.self_rank
                     || !self.data.write_phase {
                         return;
                 }
                 self.data.acklist.insert(cmd.header.process_identifier, true);
 
-                if self.data.acklist.len() as u8 >= self.n / 2 { // >= because self ack is not in acklist
+                if self.data.acklist.len() as u8 > self.n / 2 { // >= because self ack is not in acklist
                     self.data.acklist.clear();
                     self.data.write_phase = false;
 

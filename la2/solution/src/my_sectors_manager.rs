@@ -44,6 +44,7 @@ impl MySectorsManager {
 
     pub async fn get_filename_from_idx(&self, search_idx: SectorIdx) -> Option<String> {
         // not sure why I abandoned the in memory idx->filename map approach
+        // this map under mutex/rwlock
         // TODO: revisit later
         let mut dir_entries = read_dir(&self.path).await.unwrap();
         // let dir: File = File::open(&self.path).await.unwrap();
@@ -102,6 +103,7 @@ impl SectorsManager for MySectorsManager {
         }
     }
 
+    // TODO: delete (remove) old file name (with old ts, wr)
     async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
         let file_name = format!("{}_{}_{}", idx, sector.1, sector.2);
         // self.idx_map.insert(idx, file_name.clone());
