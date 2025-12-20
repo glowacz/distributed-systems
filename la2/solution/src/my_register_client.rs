@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::{path::PathBuf, sync::Arc};
 
@@ -32,6 +32,8 @@ pub struct MyRegisterClient {
     state: Arc<SharedState>
 }
 
+// TODO: change the level of every log to trace! (maybe except new connection)
+
 impl MyRegisterClient {
     pub async fn new(conf: Configuration) -> Self {
         let self_addr = conf.public.tcp_locations[(conf.public.self_rank - 1) as usize].clone();
@@ -55,7 +57,7 @@ impl MyRegisterClient {
         }
     }
 
-    pub async fn reply_to_client(&self, cmd: Arc<ClientCommandResponse>, ip: String, port: u16) -> std::io::Result<()> {
+    pub async fn reply_to_client(&self, cmd: ClientCommandResponse, ip: String, port: u16) -> std::io::Result<()> {
         // TODO should it be stubborn as well ???
         let hmac_key = self.state.hmac_client_key;
         
@@ -167,6 +169,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
         
         let mut processing_client = false;
         let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(1000);
+        let mut client_wait_queue = VecDeque::new();
 
         // if there is sth on client queue, start by moving it to main queue
         let res = client_rx.try_recv();
@@ -191,6 +194,16 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
 
         // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
         loop {
+            info!("[AR worker {}, {}]: loop", client.self_rank, sector_idx);
+            // check if we're processing client request and if there is sth on client queue
+            // if NO and YES, move the request from client to main queue
+
+            if !processing_client && !client_wait_queue.is_empty() {
+                info!("[AR worker {}, {}]: getting client request from client wait queue to main queue", client.self_rank, sector_idx);
+                let (recv_cmd, writer_opt) = client_wait_queue.pop_front().unwrap();
+                let _ = tx.send((recv_cmd, writer_opt)).await;
+            }
+
             select! {
                 Some((recv_cmd, ip_port_opt)) = rx.recv() => {
                     info!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
@@ -214,9 +227,11 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                                     + Sync,
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
-                                    info!("Callback will send response: {:?}", response.status);
-                                    let _ = client_clone.reply_to_client(Arc::new(response), ip, port).await;
-                                    let _ = tx_client_done_clone.send(());
+                                    info!("Callback will send response: {:?} to client", response);
+                                    let _ = client_clone.reply_to_client(response, ip, port).await;
+                                    info!("Callback SENT response to client");
+                                    let _ = tx_client_done_clone.send(()).await;
+                                    info!("Callback sent information that we're done with this client onto the queue");
                                 })
                             });
                             register.client_command(cmd, success_callback).await;
@@ -232,18 +247,20 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                     info!("[{}]: finished processing whole CLIENT request for sector {}", client.self_rank, sector_idx);
                     processing_client = false;
                 }
-            }
-            
-            // check if we're processing client request and if there is sth on client queue
-            // if NO and YES, move the request from client to main queue
-            if !processing_client {
-                let res = client_rx.try_recv();
-                if let Ok((recv_cmd, writer_opt)) = res {
-                    info!("[{}]: adding new CLIENT request for sector {} to main queue", client.self_rank, sector_idx);
-                    let _ = tx.send((recv_cmd, writer_opt)).await;
+                Some((recv_cmd, writer_opt)) = client_rx.recv() => {
+                    info!("[AR worker {}, {}]: received CLIENT request on client queue", client.self_rank, sector_idx);
+                    if !processing_client {
+                        let _ = tx.send((recv_cmd, writer_opt)).await;
+                        info!("[AR worker {}, {}]: putting CLIENT request on the MAIN queue", client.self_rank, sector_idx);
+
+                    }
+                    else {
+                        client_wait_queue.push_back((recv_cmd, writer_opt));
+                        info!("[AR worker {}, {}]: putting CLIENT request on the WAIT queue", client.self_rank, sector_idx);
+
+                    }
                 }
             }
-
         }
     });
 
