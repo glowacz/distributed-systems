@@ -190,6 +190,7 @@ impl AtomicRegister for MyAtomicRegister {
                      // >= because (ts, wr, val) from self is not in readlist
                     // self.data.readlist.insert(self.data.self_rank, (self.data.ts, self.data.wr, self.data.val.clone()));
                     let (maxts, rr, readval) = self.highest();
+                    self.data.readval = readval.clone();
                     self.data.readlist.clear();
                     self.data.acklist.clear();
                     self.data.write_phase = true;
