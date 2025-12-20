@@ -23,6 +23,11 @@ pub trait StableStorage: Send + Sync {
     ///
     /// Detailed requirements are specified in the description of the assignment.
     async fn get(&self, key: &str) -> Option<Vec<u8>>;
+    
+    /// Removes `key` and the value stored under it.
+    ///
+    /// Detailed requirements are specified in the description of the assignment.
+    async fn remove(&mut self, key: &str) -> bool;
 }
 
 /// Creates a new instance of stable storage.
@@ -189,5 +194,20 @@ impl StableStorage for MyStableStorage {
         file.read_to_end(&mut bytes).await.unwrap();
 
         return Some(bytes);
+    }
+
+    async fn remove(&mut self, key: &str) -> bool {        
+        let path = self.create_path(key);
+        let file_res = File::open(path.clone()).await;
+        if let Ok(_v) = file_res {
+            if let Err(_e) = remove_file(path).await {
+                return false;
+            }
+        }
+        else {
+            return false;
+        }
+
+        return true;
     }
 }

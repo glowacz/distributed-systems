@@ -9,7 +9,7 @@ use tokio::select;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::{ClientCommandResponse, serialize_client_response};
+use crate::{ClientCommandResponse, build_sectors_manager, sectors_manager_public, serialize_client_response};
 use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, my_atomic_register::MyAtomicRegister, my_sectors_manager::MySectorsManager, register_client_public, serialize_register_command};
 use crate::atomic_register_public::AtomicRegister;
 
@@ -20,7 +20,7 @@ struct SharedState {
     tcp_writers: Arc<RwLock<HashMap<(String, u16), Arc<Mutex<OwnedWriteHalf>>>>>,
     main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
     client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
-    sectors_manager: Arc<MySectorsManager>
+    sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>
 }
 
 #[derive(Clone)]
@@ -35,11 +35,7 @@ pub struct MyRegisterClient {
 impl MyRegisterClient {
     pub async fn new(conf: Configuration) -> Self {
         let self_addr = conf.public.tcp_locations[(conf.public.self_rank - 1) as usize].clone();
-        let sectors_manager = Arc::new(
-            MySectorsManager::new(
-                conf.public.storage_dir
-            ).await
-        );
+        let sectors_manager = build_sectors_manager(conf.public.storage_dir).await;
 
         let state = Arc::new(SharedState {
             hmac_system_key: conf.hmac_system_key,
@@ -156,7 +152,7 @@ async fn add_peer(state: Arc<SharedState>, addr: SocketAddr, writer: OwnedWriteH
     // map_guard dropped -> unlocks the HashMap
 }
 
-async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, sector_idx: u64,
+async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, sector_idx: u64,
             mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<(String, u16)>)>,
             tx: tokio::sync::mpsc::Sender<(RegisterCommand, Option<(String, u16)>)>,
             mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<(String, u16)>)>
@@ -257,7 +253,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<MyS
     // AND NO BREAKABLE (TCP) CONNECTIONS, IT WON'T END)
 }
 
-async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<MySectorsManager>, 
+async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, 
     mut rd: OwnedReadHalf, client_ip: String, client_port: u16) { // reading from a single client/node
     let _ = tokio::spawn( async move {
         let self_addr = client.self_addr.clone();

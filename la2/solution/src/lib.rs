@@ -101,7 +101,9 @@ pub mod sectors_manager_public {
 
     /// Path parameter points to a directory to which this method has exclusive access.
     pub async fn build_sectors_manager(path: PathBuf) -> Arc<dyn SectorsManager> {
-        Arc::new(crate::my_sectors_manager::MySectorsManager::new(path).await)
+        let mut sectors_manager = crate::my_sectors_manager::MySectorsManager::new(path).await;
+        sectors_manager.startup().await;
+        Arc::new(sectors_manager)
     }
 }
 
