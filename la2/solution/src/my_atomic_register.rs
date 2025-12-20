@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use log::{debug, info, warn};
+use log::{trace};
 use serde_big_array::Array;
 use uuid::Uuid;
 
@@ -110,7 +110,7 @@ impl AtomicRegister for MyAtomicRegister {
                 + Sync,
         >,
     ) {
-        info!("[AR CLASS {}]: received CLIENT command {}", 
+        trace!("[AR CLASS {}]: received CLIENT command {}", 
           self.data.self_rank, cmd);
 
         self.data.op_id = Uuid::new_v4();
@@ -146,7 +146,7 @@ impl AtomicRegister for MyAtomicRegister {
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-        info!("[AR CLASS {}]: received SYSTEM command {}", 
+        trace!("[AR CLASS {}]: received SYSTEM command {}", 
           self.data.self_rank, cmd);
 
         match cmd.content {
@@ -163,13 +163,13 @@ impl AtomicRegister for MyAtomicRegister {
                         sector_data: self.data.val.clone()
                     }
                 };
-                // info!("[AR CLASS {}]: BEFORE sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
+                // trace!("[AR CLASS {}]: BEFORE sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
                 self.client.send( 
                     crate::Send {
                         cmd: Arc::new(command),
                         target: cmd.header.process_identifier
                 }).await;
-                info!("[AR CLASS {}]: AFTER sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
+                trace!("[AR CLASS {}]: AFTER sending reply to ReadProc to {}", self.data.self_rank, cmd.header.process_identifier);
 
             },
             SystemRegisterCommandContent::Value {
@@ -177,13 +177,13 @@ impl AtomicRegister for MyAtomicRegister {
                 write_rank, 
                 sector_data 
             } => {
-                warn!("[AR CLASS {}]: got Value from {}", self.data.self_rank, cmd.header.process_identifier);
+                trace!("[AR CLASS {}]: got Value from {}", self.data.self_rank, cmd.header.process_identifier);
                 // if cmd.header.msg_ident != self.data.op_id || cmd.header.process_identifier == self.data.self_rank {
                 if cmd.header.msg_ident != self.data.op_id {
                     return;
                 }
                 self.data.readlist.insert(cmd.header.process_identifier, (timestamp, write_rank, sector_data));
-                info!("[AR CLASS {}]: inserted {} into readlist with (ts: {}, wr: {})", self.data.self_rank, 
+                trace!("[AR CLASS {}]: inserted {} into readlist with (ts: {}, wr: {})", self.data.self_rank, 
                     cmd.header.process_identifier, timestamp, write_rank);
 
                 if self.data.readlist.len() as u8 > self.n / 2 && (self.data.reading || self.data.writing) {
@@ -240,7 +240,7 @@ impl AtomicRegister for MyAtomicRegister {
                 write_rank, 
                 data_to_write 
             } => {
-                info!("[AR CLASS {}]: got WriteProc from {}", self.data.self_rank, cmd.header.process_identifier);
+                trace!("[AR CLASS {}]: got WriteProc from {}", self.data.self_rank, cmd.header.process_identifier);
 
                 if (self.data.ts, self.data.wr) < (timestamp, write_rank) {
                     let (ts, wr, val) = (timestamp, write_rank, data_to_write);
@@ -262,7 +262,7 @@ impl AtomicRegister for MyAtomicRegister {
                 }).await;
             },
             SystemRegisterCommandContent::Ack => {
-                info!("[AR CLASS {}]: got Ack from {}", self.data.self_rank, cmd.header.process_identifier);
+                trace!("[AR CLASS {}]: got Ack from {}", self.data.self_rank, cmd.header.process_identifier);
                 if cmd.header.msg_ident != self.data.op_id 
                     // || cmd.header.process_identifier == self.data.self_rank
                     || !self.data.write_phase {

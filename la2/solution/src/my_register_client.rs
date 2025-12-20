@@ -1,8 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info, warn};
+use log::{error, trace, warn};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
@@ -10,7 +9,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{ClientCommandResponse, build_sectors_manager, sectors_manager_public, serialize_client_response};
-use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, my_atomic_register::MyAtomicRegister, my_sectors_manager::MySectorsManager, register_client_public, serialize_register_command};
+use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, my_atomic_register::MyAtomicRegister, register_client_public, serialize_register_command};
 use crate::atomic_register_public::AtomicRegister;
 
 struct SharedState {
@@ -128,7 +127,7 @@ impl MyRegisterClient {
 impl RegisterClient for MyRegisterClient {
     async fn send(&self, msg: register_client_public::Send) {
         let _ = self.send_msg(msg.cmd, msg.target).await;
-        info!("[{}]: sending to target {}", self.self_rank, msg.target);
+        trace!("[{}]: sending to target {}", self.self_rank, msg.target);
     }
 
     async fn broadcast(&self, msg: Broadcast) {
@@ -138,7 +137,7 @@ impl RegisterClient for MyRegisterClient {
             // await the creation of the task so that it actually happens,
             // (the finishing of the task is not awaited)
             let _ = self.send_msg(msg.cmd.clone(), target).await;
-            info!("[{}]: broadcasting to target {}", self.self_rank, target);
+            trace!("[{}]: broadcasting to target {}", self.self_rank, target);
         }
     }
 }
@@ -159,7 +158,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
     // let sectors_manager = sectors_manager.clone();
 
     let _ = tokio::spawn( async move {
-        info!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
+        trace!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
         // let client = client.clone();
         // let sectors_manager = sectors_manager.clone();
         
@@ -170,7 +169,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
         // if there is sth on client queue, start by moving it to main queue
         let res = client_rx.try_recv();
         if let Ok((recv_cmd, writer_opt)) = res {
-            info!("[{}]: Received command on client queue, piping to main",
+            trace!("[{}]: Received command on client queue, piping to main",
             client.self_rank);
             let _ = tx.send((recv_cmd, writer_opt)).await;
         }
@@ -186,23 +185,23 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
             n
         ).await;
 
-        info!("[AR worker {}]: Starting LOOP for sector {}", client.self_rank, sector_idx);
+        trace!("[AR worker {}]: Starting LOOP for sector {}", client.self_rank, sector_idx);
 
         // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
         loop {
-            info!("[AR worker {}, {}]: loop", client.self_rank, sector_idx);
+            trace!("[AR worker {}, {}]: loop", client.self_rank, sector_idx);
             // check if we're processing client request and if there is sth on client queue
             // if NO and YES, move the request from client to main queue
 
             if !processing_client && !client_wait_queue.is_empty() {
-                info!("[AR worker {}, {}]: getting client request from client wait queue to main queue", client.self_rank, sector_idx);
+                trace!("[AR worker {}, {}]: getting client request from client wait queue to main queue", client.self_rank, sector_idx);
                 let (recv_cmd, writer_opt) = client_wait_queue.pop_front().unwrap();
                 let _ = tx.send((recv_cmd, writer_opt)).await;
             }
 
             select! {
                 Some((recv_cmd, ip_port_opt)) = rx.recv() => {
-                    info!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
+                    trace!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
                             processing_client = true;
@@ -223,36 +222,36 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                                     + Sync,
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
-                                    info!("Callback will send response: {:?} to client", response.status);
+                                    trace!("Callback will send response: {:?} to client", response.status);
                                     let _ = client_clone.reply_to_client(response, ip, port).await;
-                                    info!("Callback SENT response to client");
+                                    trace!("Callback SENT response to client");
                                     let _ = tx_client_done_clone.send(()).await;
-                                    info!("Callback sent information that we're done with this client onto the queue");
+                                    trace!("Callback sent information that we're done with this client onto the queue");
                                 })
                             });
                             register.client_command(cmd, success_callback).await;
-                            info!("[AR worker {}]: fully delivered CLIENT command to AR struct for sector {}", client.self_rank, sector_idx);
+                            trace!("[AR worker {}]: fully delivered CLIENT command to AR struct for sector {}", client.self_rank, sector_idx);
                         },
                         RegisterCommand::System(cmd) => {
                             register.system_command(cmd).await;
-                            info!("[{}]: sent SYSTEM command for sector {}", client.self_rank, sector_idx);
+                            trace!("[{}]: sent SYSTEM command for sector {}", client.self_rank, sector_idx);
                         },
                     }
                 }
                 _ = rx_client_done.recv() => {
-                    info!("[{}]: finished processing whole CLIENT request for sector {}", client.self_rank, sector_idx);
+                    trace!("[{}]: finished processing whole CLIENT request for sector {}", client.self_rank, sector_idx);
                     processing_client = false;
                 }
                 Some((recv_cmd, writer_opt)) = client_rx.recv() => {
-                    info!("[AR worker {}, {}]: received CLIENT request on client queue", client.self_rank, sector_idx);
+                    trace!("[AR worker {}, {}]: received CLIENT request on client queue", client.self_rank, sector_idx);
                     if !processing_client {
                         let _ = tx.send((recv_cmd, writer_opt)).await;
-                        info!("[AR worker {}, {}]: putting CLIENT request on the MAIN queue", client.self_rank, sector_idx);
+                        trace!("[AR worker {}, {}]: putting CLIENT request on the MAIN queue", client.self_rank, sector_idx);
 
                     }
                     else {
                         client_wait_queue.push_back((recv_cmd, writer_opt));
-                        info!("[AR worker {}, {}]: putting CLIENT request on the WAIT queue", client.self_rank, sector_idx);
+                        trace!("[AR worker {}, {}]: putting CLIENT request on the WAIT queue", client.self_rank, sector_idx);
 
                     }
                 }
@@ -271,8 +270,8 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
         for i in 0.. {
             let deserialize_res = crate::deserialize_register_command(
                 &mut rd, &state.hmac_system_key, &state.hmac_client_key).await;
-            // info!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
-            info!("[{}:{}]: Deserialized message", self_addr.0, self_addr.1);
+            // trace!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
+            trace!("[{}:{}]: Deserialized message", self_addr.0, self_addr.1);
             match deserialize_res {
                 Ok((recv_cmd, hmac_valid)) => {
                     match recv_cmd {
@@ -293,7 +292,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 return;
                             }
 
-                            info!("[{}:{}]: Received valid SYSTEM command {}",
+                            trace!("[{}:{}]: Received valid SYSTEM command {}",
                                 self_addr.0, self_addr.1, cmd);
                             let sector_idx = cmd.header.sector_idx;
                             // the rx_opt is Option (bc it might not be in map) 
@@ -397,7 +396,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                             };
 
                             client_tx.send((RegisterCommand::Client(cmd), Some((client_ip.clone(), client_port)))).await.unwrap();
-                            info!("[{}:{}]: Sent command onto the client queue",
+                            trace!("[{}:{}]: Sent command onto the client queue",
                             self_addr.0, self_addr.1);
 
                             // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
@@ -422,18 +421,18 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
 pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String, u16), _storage_dir: PathBuf) {
     let sectors_manager = client.state.sectors_manager.clone();
 
-    info!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
+    trace!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
 
     tokio::spawn( async move { // TCP server task (receive messages)
         let socket = TcpListener::bind(
             format!("{}:{}", self_addr.0, self_addr.1)
         ).await.unwrap();
 
-        info!("Bound to socket {}:{}", self_addr.0, self_addr.1);
+        trace!("Bound to socket {}:{}", self_addr.0, self_addr.1);
 
         loop {
             let (socket, client_addr) = socket.accept().await.unwrap();
-            info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
+            trace!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
             
             let (rd, wr) = socket.into_split();
             let protected_writer = Arc::new(Mutex::new(wr));
