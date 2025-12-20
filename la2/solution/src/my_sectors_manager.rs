@@ -3,6 +3,7 @@ use crate::{SectorIdx, SectorVec};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::stable_storage::{MyStableStorage, StableStorage, build_my_stable_storage};
+use log::warn;
 use serde_big_array::Array;
 use tokio::fs::read_dir;
 use tokio::sync::{Mutex, RwLock};
@@ -62,6 +63,7 @@ impl SectorsManager for MySectorsManager {
     async fn read_data(&self, idx: SectorIdx) -> SectorVec {
         let file_name = match self.idx_map.read().await.get(&idx).cloned() {
             None => {
+                warn!("\n\nTHERE WAS NO DATA FOR SECTOR {}\n\n", idx);
                 return SectorVec(Box::new(Array([0u8; 4096])));
             },
             Some((name, _ts, _wr)) => name,

@@ -209,18 +209,18 @@ impl fmt::Display for SystemRegisterCommandContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadProc => write!(f, "ReadProc"),
-            Self::Value { timestamp, write_rank, .. } => {
+            Self::Value { timestamp, write_rank, sector_data } => {
                 write!(
                     f,
-                    "Value {{ timestamp: {}, write_rank: {} }}",
-                    timestamp, write_rank
+                    "Value {{ timestamp: {}, write_rank: {}, data_to_write: {:?} }}",
+                    timestamp, write_rank, &sector_data.0[0..50]
                 )
             }
-            Self::WriteProc { timestamp, write_rank, .. } => {
+            Self::WriteProc { timestamp, write_rank, data_to_write } => {
                 write!(
                     f,
-                    "WriteProc {{ timestamp: {}, write_rank: {}, data_to_write: <SectorVec> }}",
-                    timestamp, write_rank
+                    "WriteProc {{ timestamp: {}, write_rank: {}, data_to_write: {:?} }}",
+                    timestamp, write_rank, &data_to_write.0[0..50]
                 )
             }
             Self::Ack => write!(f, "Ack"),
