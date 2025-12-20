@@ -87,41 +87,40 @@ impl MyRegisterClient {
         // TODO make it stubborn
         let (ip, port) = self.state.tcp_locations[(target - 1) as usize].clone();
         let hmac_key = self.state.hmac_system_key;
-        let single_mut = {
-            let arc_single_mut_opt = self.state.tcp_writers.read().await.get(&(ip.clone(), port)).cloned();
-            match arc_single_mut_opt {
-                Some(arc_single_mut) => arc_single_mut.clone(),
-                None => {
-                    self.connect_to_node(ip, port).await
-                }
-            }
-            // guard for the whole map dropped here, won't block further
-        };
-        // let single_mut = self.tcp_writers.read().await.get(&(ip, port)).cloned()?;
+        let tcp_writers = self.state.tcp_writers.clone();
+        let self_arc = Arc::new(self.clone());
+        let sectors_manager = self.state.sectors_manager.clone();
 
         let _ = tokio::spawn( async move {
-            
+            let single_mut = {
+                let arc_single_mut_opt = tcp_writers.read().await.get(&(ip.clone(), port)).cloned();
+                match arc_single_mut_opt {
+                    Some(single_mut) => single_mut.clone(),
+                    None => {
+                        // Connecting to this node if we didn't have a connection before
+                        // self.connect_to_node(ip, port).await
+                        let tcp_stream = TcpStream::connect(format!("{}:{}", ip.clone(), port)).await.unwrap();
+                        let (rd, wr) = tcp_stream.into_split();
 
+                        let protected_writer = Arc::new(Mutex::new(wr));
+
+                        let mut map_guard = tcp_writers.write().await;
+                        map_guard.insert((ip.clone(), port), protected_writer.clone());
+
+                        start_tcp_reader_task(self_arc, sectors_manager.clone(), protected_writer.clone(), rd, ip.clone(), port).await;
+
+                        protected_writer
+                    }
+                }
+                // guard for the whole map dropped here, won't block further
+            };
+            // let single_mut = self.tcp_writers.read().await.get(&(ip, port)).cloned()?;
+
+        // let _ = tokio::spawn( async move {
             let cmd = RegisterCommand::System((*cmd).clone());
             let mut tcp_writer = single_mut.lock().await;
             let _ = serialize_register_command(&cmd, &mut *tcp_writer, &hmac_key).await;
         });
-    }
-
-    async fn connect_to_node(&self, ip: String, port: u16) -> Arc<Mutex<OwnedWriteHalf>> {
-        let tcp_stream = TcpStream::connect(format!("{}:{}", ip.clone(), port)).await.unwrap();
-        let (rd, wr) = tcp_stream.into_split();
-
-        let protected_writer = Arc::new(Mutex::new(wr));
-
-        let mut map_guard = self.state.tcp_writers.write().await;
-        map_guard.insert((ip.clone(), port), protected_writer.clone());
-
-        let self_arc = Arc::new(self.clone());
-
-        start_tcp_reader_task(self_arc, self.state.sectors_manager.clone(), rd, ip.clone(), port).await;
-
-        protected_writer
     }
 }
 
@@ -144,14 +143,11 @@ impl RegisterClient for MyRegisterClient {
     }
 }
 
-async fn add_peer(state: Arc<SharedState>, addr: SocketAddr, writer: OwnedWriteHalf) {
-    // TODO: will the address parse well ?
-    let key = (addr.ip().to_string(), addr.port());
-    let protected_writer = Arc::new(Mutex::new(writer));
+async fn add_peer(state: Arc<SharedState>, ip: String, port: u16, writer: Arc<Mutex<OwnedWriteHalf>>) {
+    let key = (ip, port);
 
     let mut map_guard = state.tcp_writers.write().await;
-    map_guard.insert(key, protected_writer);
-    // map_guard dropped -> unlocks the HashMap
+    map_guard.insert(key, writer);
 }
 
 async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, sector_idx: u64,
@@ -227,7 +223,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                                     + Sync,
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
-                                    info!("Callback will send response: {:?} to client", response);
+                                    info!("Callback will send response: {:?} to client", response.status);
                                     let _ = client_clone.reply_to_client(response, ip, port).await;
                                     info!("Callback SENT response to client");
                                     let _ = tx_client_done_clone.send(()).await;
@@ -263,20 +259,16 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
             }
         }
     });
-
-    // TODO: remove the tx from hashmap when the task ends
-    // and maybe should join the task handle
-    // BUT FOR NOW DON'T END THE TASK (IT HAS INFINITE LOOP 
-    // AND NO BREAKABLE (TCP) CONNECTIONS, IT WON'T END)
 }
 
 async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, 
-    mut rd: OwnedReadHalf, client_ip: String, client_port: u16) { // reading from a single client/node
+    wr: Arc<Mutex<OwnedWriteHalf>>, mut rd: OwnedReadHalf, 
+    client_ip: String, client_port: u16) { // reading from a single client/node
     let _ = tokio::spawn( async move {
         let self_addr = client.self_addr.clone();
         let state = client.state.clone();
 
-        loop {
+        for i in 0.. {
             let deserialize_res = crate::deserialize_register_command(
                 &mut rd, &state.hmac_system_key, &state.hmac_client_key).await;
             // info!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
@@ -285,6 +277,11 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                 Ok((recv_cmd, hmac_valid)) => {
                     match recv_cmd {
                         RegisterCommand::System(cmd) => {
+                            if i == 0 {
+                                let (node_ip, node_port) = client.state.tcp_locations[(cmd.header.process_identifier - 1) as usize].clone();
+                                add_peer(state.clone(), node_ip, node_port, wr.clone()).await;
+                            }
+                            
                             if !hmac_valid {
                                 error!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
                                 self_addr.0, self_addr.1, cmd);
@@ -345,6 +342,10 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                             }
                         },
                         RegisterCommand::Client(cmd) => {
+                            if i == 0 {
+                                add_peer(state.clone(), client_ip.clone(), client_port, wr.clone()).await;
+                            }
+
                             if !hmac_valid {
                                 error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
                                 self_addr.0, self_addr.1, cmd);
@@ -370,8 +371,6 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                             // regardless of whether the map has a client queue, 
                             // we should check if the map has the main queue, 
                             // as this determines the task
-                            // TODO: as deserialization and piping the command to AR worker
-                            // should happen in a new task, we will need mutex for the queues
                             let tx_opt = state.main_cmd_senders.read().await.get(&sector_idx).cloned();
                             let (tx, rx_opt) = match tx_opt {
                                 None => {
@@ -437,8 +436,8 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
             info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
             
             let (rd, wr) = socket.into_split();
-            add_peer(client.state.clone(), client_addr, wr).await;
-            start_tcp_reader_task(client.clone(), sectors_manager.clone(), rd, client_addr.ip().to_string(), client_addr.port()).await;
+            let protected_writer = Arc::new(Mutex::new(wr));
+            start_tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer, rd, client_addr.ip().to_string(), client_addr.port()).await;
 
             
         }
