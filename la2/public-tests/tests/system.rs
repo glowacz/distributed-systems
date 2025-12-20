@@ -13,15 +13,23 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-
 use std::io::Write;
 
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Warn)
-        .format(|buf, record| {
-            writeln!(buf, "{}", record.args())
+        .filter_level(log::LevelFilter::Info)
+        // .format(|buf, record| { // NO Timestamps
+        //     writeln!(buf, "{}", record.args())
+        // })
+        .format(|buf, record| { // precise timestamps
+            writeln!(
+                buf,
+                "{} [{}] - {}",
+                buf.timestamp_millis(),
+                record.level(),
+                record.args()
+            )
         })
         .try_init();
 }
@@ -87,6 +95,10 @@ async fn single_process_system_completes_operations() {
     assert_eq!(buf[..cmp_bytes], expected.as_slice()[..cmp_bytes]);
     assert!(hmac_tag_is_ok(&hmac_client_key, &buf[8..]));
 }
+
+// TODO: I may have tweaked this timeout
+// but it still sometimes isn't enough for my system
+// need to investigate
 
 #[tokio::test]
 #[serial_test::serial]

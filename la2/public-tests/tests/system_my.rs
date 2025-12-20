@@ -9,14 +9,25 @@ use ntest::timeout;
 use serde_big_array::Array;
 use tokio::io::{AsyncWriteExt};
 use tokio::net::TcpStream;
+use std::io::Write;
+use chrono::Local;
 
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Warn)
-        // .format(|buf, record| {
+        .filter_level(log::LevelFilter::Info)
+        // .format(|buf, record| { // NO Timestamps
         //     writeln!(buf, "{}", record.args())
         // })
+        .format(|buf, record| { // precise timestamps
+            writeln!(
+                buf,
+                "{} [{}] - {}",
+                Local::now().format("%M:%S%.3f"),
+                record.level(),
+                record.args()
+            )
+        })
         .try_init();
 }
 
@@ -90,6 +101,7 @@ async fn two_nodes() {
     }
 }
 
+// TODO: in this test only 5 connections should form: client <--> Node 0 and Node 0 with every other node (incl self for now)
 #[tokio::test]
 #[serial_test::serial]
 #[timeout(100000)]

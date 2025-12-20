@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, trace, warn};
+use log::{error, info, trace, warn};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
@@ -90,6 +90,8 @@ impl MyRegisterClient {
         let self_arc = Arc::new(self.clone());
         let sectors_manager = self.state.sectors_manager.clone();
 
+        let self_rank = self.self_rank;
+
         let _ = tokio::spawn( async move {
             let single_mut = {
                 let arc_single_mut_opt = tcp_writers.read().await.get(&(ip.clone(), port)).cloned();
@@ -100,6 +102,7 @@ impl MyRegisterClient {
                         // self.connect_to_node(ip, port).await
                         let tcp_stream = TcpStream::connect(format!("{}:{}", ip.clone(), port)).await.unwrap();
                         let (rd, wr) = tcp_stream.into_split();
+                        info!("[{}]: connected to node {} (indexed from 1)", self_rank, target);
 
                         let protected_writer = Arc::new(Mutex::new(wr));
 
@@ -204,6 +207,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                     trace!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
+                            info!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
                             processing_client = true;
                             // let tcp_writer_clone = tcp_writer.clone();
                             let (ip, port) = match ip_port_opt {
@@ -239,7 +243,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                     }
                 }
                 _ = rx_client_done.recv() => {
-                    trace!("[{}]: finished processing whole CLIENT request for sector {}", client.self_rank, sector_idx);
+                    info!("[AR worker {}, {}]: finished processing whole client request", client.self_rank, sector_idx);
                     processing_client = false;
                 }
                 Some((recv_cmd, writer_opt)) = client_rx.recv() => {
@@ -363,7 +367,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 return;
                             }
 
-                            warn!("[{}:{}]: Received valid CLIENT command from ({},{})\nCommand:{}",
+                            trace!("[{}:{}]: Received valid CLIENT command from ({},{})\nCommand:{}",
                                 self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
 
@@ -421,7 +425,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
 pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String, u16), _storage_dir: PathBuf) {
     let sectors_manager = client.state.sectors_manager.clone();
 
-    trace!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
+    info!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
 
     tokio::spawn( async move { // TCP server task (receive messages)
         let socket = TcpListener::bind(
@@ -432,13 +436,11 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
 
         loop {
             let (socket, client_addr) = socket.accept().await.unwrap();
-            trace!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
+            info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
             
             let (rd, wr) = socket.into_split();
             let protected_writer = Arc::new(Mutex::new(wr));
-            start_tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer, rd, client_addr.ip().to_string(), client_addr.port()).await;
-
-            
+            start_tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer, rd, client_addr.ip().to_string(), client_addr.port()).await;  
         }
     });
 }
