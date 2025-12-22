@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info, trace, warn};
+use log::{error, info, trace,};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
@@ -16,6 +16,7 @@ struct SharedState {
     hmac_system_key: [u8; 64],
     hmac_client_key: [u8; 32],
     tcp_locations: Vec<(String, u16)>,
+    have_connection: Vec<Mutex<bool>>,
     tcp_writers: Arc<RwLock<HashMap<(String, u16), Arc<Mutex<OwnedWriteHalf>>>>>,
     main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
     client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
@@ -37,11 +38,15 @@ impl MyRegisterClient {
     pub async fn new(conf: Configuration) -> Self {
         let self_addr = conf.public.tcp_locations[(conf.public.self_rank - 1) as usize].clone();
         let sectors_manager = build_sectors_manager(conf.public.storage_dir).await;
+        let have_connection: Vec<Mutex<bool>> = (0..conf.public.tcp_locations.len())
+            .map(|_| Mutex::new(false))
+            .collect();
 
         let state = Arc::new(SharedState {
             hmac_system_key: conf.hmac_system_key,
             hmac_client_key: conf.hmac_client_key,
             tcp_locations: conf.public.tcp_locations,
+            have_connection,
             tcp_writers: Arc::new(RwLock::new(HashMap::new())),
             main_cmd_senders: Arc::new(RwLock::new(HashMap::new())),
             client_cmd_senders: Arc::new(RwLock::new(HashMap::new())),
@@ -74,9 +79,12 @@ impl MyRegisterClient {
             // guard for the whole map dropped here, won't block further
         };
 
+        let self_rank = self.self_rank;
         let _ = tokio::spawn( async move {
+            info!("[MyRegisterClient {}] Before replying to client", self_rank);
             let mut tcp_writer = single_mut.lock().await;
             let _ = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
+            info!("\n\n[MyRegisterClient {}] After replying to client\n\n", self_rank);
         });
 
         return Ok(());
@@ -93,32 +101,34 @@ impl MyRegisterClient {
         let self_rank = self.self_rank;
 
         let _ = tokio::spawn( async move {
+            let mut have_conn_guard = self_arc.state.have_connection[(target - 1) as usize].lock().await;
             let single_mut = {
-                let arc_single_mut_opt = tcp_writers.read().await.get(&(ip.clone(), port)).cloned();
-                match arc_single_mut_opt {
-                    Some(single_mut) => single_mut.clone(),
-                    None => {
-                        // Connecting to this node if we didn't have a connection before
-                        // self.connect_to_node(ip, port).await
+                match *have_conn_guard {
+                    false => {
+                        *have_conn_guard = true;
+
+                        // TODO: change it to stubborn
                         let tcp_stream = TcpStream::connect(format!("{}:{}", ip.clone(), port)).await.unwrap();
                         let (rd, wr) = tcp_stream.into_split();
-                        info!("[{}]: connected to node {} (indexed from 1)", self_rank, target);
+                        info!("[{}]: connected to node {} ({}{})", self_rank, target, ip.clone(), port);
 
                         let protected_writer = Arc::new(Mutex::new(wr));
 
                         let mut map_guard = tcp_writers.write().await;
                         map_guard.insert((ip.clone(), port), protected_writer.clone());
 
-                        start_tcp_reader_task(self_arc, sectors_manager.clone(), protected_writer.clone(), rd, ip.clone(), port).await;
+                        start_tcp_reader_task(self_arc.clone(), sectors_manager.clone(), protected_writer.clone(), rd, ip.clone(), port).await;
 
                         protected_writer
                     }
+                    true => {
+                        let mutex_opt = tcp_writers.read().await.get(&(ip.clone(), port)).cloned();
+                        mutex_opt.unwrap()
+                        // single_mut.clone()
+                    } 
                 }
-                // guard for the whole map dropped here, won't block further
             };
-            // let single_mut = self.tcp_writers.read().await.get(&(ip, port)).cloned()?;
 
-        // let _ = tokio::spawn( async move {
             let cmd = RegisterCommand::System((*cmd).clone());
             let mut tcp_writer = single_mut.lock().await;
             let _ = serialize_register_command(&cmd, &mut *tcp_writer, &hmac_key).await;
@@ -147,6 +157,11 @@ impl RegisterClient for MyRegisterClient {
 
 async fn add_peer(state: Arc<SharedState>, ip: String, port: u16, writer: Arc<Mutex<OwnedWriteHalf>>) {
     let key = (ip, port);
+
+    // TODO: have separate tcp_writers for nodes of system and clients
+    // this should increase performance with mutexes
+    // and maybe will solve a bug
+    // also, will make code simpler, no need to look up tcp_locations
 
     let mut map_guard = state.tcp_writers.write().await;
     map_guard.insert(key, writer);
@@ -226,7 +241,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                                     + Sync,
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
-                                    trace!("Callback will send response: {:?} to client", response.status);
+                                    trace!("Callback will send response: {:?} to client", response);
                                     let _ = client_clone.reply_to_client(response, ip, port).await;
                                     trace!("Callback SENT response to client");
                                     let _ = tx_client_done_clone.send(()).await;
@@ -272,6 +287,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
         let state = client.state.clone();
 
         for i in 0.. {
+            trace!("[{}:{}]: ready to read and deserialize next message", self_addr.0, self_addr.1);
             let deserialize_res = crate::deserialize_register_command(
                 &mut rd, &state.hmac_system_key, &state.hmac_client_key).await;
             // trace!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
@@ -367,7 +383,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 return;
                             }
 
-                            trace!("[{}:{}]: Received valid CLIENT command from ({},{})\nCommand:{}",
+                            info!("[{}:{}]: Received valid CLIENT command from ({}, {})\nCommand:{}",
                                 self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
 
