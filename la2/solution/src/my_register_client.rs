@@ -18,8 +18,8 @@ struct SharedState {
     tcp_locations: Vec<(String, u16)>,
     have_connection: Vec<Mutex<bool>>,
     tcp_writers: Arc<RwLock<HashMap<(String, u16), Arc<Mutex<OwnedWriteHalf>>>>>,
-    main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
-    client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<(String, u16)>)>>>>,
+    main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>>>,
+    client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>>>,
     sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>
 }
 
@@ -61,28 +61,28 @@ impl MyRegisterClient {
         }
     }
 
-    pub async fn reply_to_client(&self, cmd: ClientCommandResponse, ip: String, port: u16) -> std::io::Result<()> {
+    pub async fn reply_to_client(&self, cmd: ClientCommandResponse, writer: Arc<Mutex<OwnedWriteHalf>>) -> std::io::Result<()> {
         // TODO should it be stubborn as well ???
         let hmac_key = self.state.hmac_client_key;
         
-        let single_mut = {
-            let read_guard = self.state.tcp_writers.read().await;
-            match read_guard.get(&(ip, port)) {
-                Some(arc_single_mut) => arc_single_mut.clone(),
-                None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound, 
-                        "Client not found"
-                    ));
-                }
-            }
-            // guard for the whole map dropped here, won't block further
-        };
+        // let single_mut = {
+        //     let read_guard = self.state.tcp_writers.read().await;
+        //     match read_guard.get(&(ip, port)) {
+        //         Some(arc_single_mut) => arc_single_mut.clone(),
+        //         None => {
+        //             return Err(std::io::Error::new(
+        //                 std::io::ErrorKind::NotFound, 
+        //                 "Client not found"
+        //             ));
+        //         }
+        //     }
+        //     // guard for the whole map dropped here, won't block further
+        // };
 
         let self_rank = self.self_rank;
         let _ = tokio::spawn( async move {
             info!("[MyRegisterClient {}] Before replying to client", self_rank);
-            let mut tcp_writer = single_mut.lock().await;
+            let mut tcp_writer = writer.lock().await;
             let _ = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
             info!("\n\n[MyRegisterClient {}] After replying to client\n\n", self_rank);
         });
@@ -168,9 +168,9 @@ async fn add_peer(state: Arc<SharedState>, ip: String, port: u16, writer: Arc<Mu
 }
 
 async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, sector_idx: u64,
-            mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<(String, u16)>)>,
-            tx: tokio::sync::mpsc::Sender<(RegisterCommand, Option<(String, u16)>)>,
-            mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<(String, u16)>)>
+    mut rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>,
+    tx: tokio::sync::mpsc::Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>,
+    mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>
     ) {
     // let client = Arc::new(self);
     // let sectors_manager = sectors_manager.clone();
@@ -218,19 +218,16 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
             }
 
             select! {
-                Some((recv_cmd, ip_port_opt)) = rx.recv() => {
+                Some((recv_cmd, writer_opt)) = rx.recv() => {
                     trace!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
                             info!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
                             processing_client = true;
                             // let tcp_writer_clone = tcp_writer.clone();
-                            let (ip, port) = match ip_port_opt {
-                                Some(ip_port) => ip_port,
-                                None => {
-                                    // error!("Client command received without TCP writer!");
-                                    continue;
-                                }
+                            let writer = match writer_opt {
+                                Some(w) => w,
+                                None => continue,
                             };
                             let client_clone = client.clone();                    
                             let tx_client_done_clone = tx_client_done.clone();
@@ -242,7 +239,7 @@ async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
                                     trace!("Callback will send response: {:?} to client", response);
-                                    let _ = client_clone.reply_to_client(response, ip, port).await;
+                                    let _ = client_clone.reply_to_client(response, writer).await;
                                     trace!("Callback SENT response to client");
                                     let _ = tx_client_done_clone.send(()).await;
                                     trace!("Callback sent information that we're done with this client onto the queue");
@@ -332,7 +329,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 None => {
                                     // TODO: revisit channel capacity
                                     let (tx, rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<(String, u16)>)>(1000);
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
                                     state.main_cmd_senders.write().await.insert(sector_idx, tx.clone());
                                     (tx.clone(), Some(rx))
                                 },
@@ -345,7 +342,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 None => {
                                     // TODO: revisit channel capacity
                                     let (client_tx, client_rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<(String, u16)>)>(1000);
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
                                         state.client_cmd_senders.write().await.insert(sector_idx, client_tx.clone());
                                     (client_tx.clone(), Some(client_rx))
                                 },
@@ -361,9 +358,9 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                             }
                         },
                         RegisterCommand::Client(cmd) => {
-                            if i == 0 {
-                                add_peer(state.clone(), client_ip.clone(), client_port, wr.clone()).await;
-                            }
+                            // if i == 0 {
+                            //     add_peer(state.clone(), client_ip.clone(), client_port, wr.clone()).await;
+                            // }
 
                             if !hmac_valid {
                                 error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
@@ -395,7 +392,7 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 None => {
                                     // TODO: revisit channel capacity
                                     let (tx, rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<(String, u16)>)>(1000);
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
                                     state.main_cmd_senders.write().await.insert(sector_idx, tx.clone());
                                     (tx.clone(), Some(rx))
                                 },
@@ -408,14 +405,16 @@ async fn start_tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: A
                                 None => {
                                     // TODO: revisit channel capacity
                                     let (client_tx, client_rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<(String, u16)>)>(1000);
+                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
                                         state.client_cmd_senders.write().await.insert(sector_idx, client_tx.clone());
                                     (client_tx.clone(), Some(client_rx))
                                 },
                                 Some(client_tx) => (client_tx, None)
                             };
 
-                            client_tx.send((RegisterCommand::Client(cmd), Some((client_ip.clone(), client_port)))).await.unwrap();
+                            client_tx.send((
+                                RegisterCommand::Client(cmd), Some(wr.clone()
+                            ))).await.unwrap();
                             trace!("[{}:{}]: Sent command onto the client queue",
                             self_addr.0, self_addr.1);
 
