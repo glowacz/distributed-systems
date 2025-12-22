@@ -18,7 +18,7 @@ use std::io::Write;
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(log::LevelFilter::Trace)
         // .format(|buf, record| { // NO Timestamps
         //     writeln!(buf, "{}", record.args())
         // })
@@ -130,11 +130,19 @@ async fn concurrent_operations_on_the_same_sector() {
                 stream,
             )
             .await;
+        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH WRITE ==================================\n\n\n");
     }
 
+    println!("\n\n\n================================== CLIENT AFTER SENDING ALL WRITES, BEFORE READ ==================================\n\n\n");
+
+    let mut i = 0;
     for stream in &mut streams {
         config.read_response(stream).await;
+        println!("\n====== CLIENT GOT WRITE RESPONSE {i} ======\n");
+        i += 1;
     }
+
+    println!("\n\n\n================================== CLIENT READ ALL RESPONSES FROM SYSTEM ==================================\n\n\n");
 
     config
         .send_cmd(
