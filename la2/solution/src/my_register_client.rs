@@ -75,8 +75,8 @@ impl MyRegisterClient {
         let _ = tokio::spawn( async move {
             info!("[MyRegisterClient {}] Before replying to client", self_rank);
             let mut tcp_writer = writer.lock().await;
-            let _ = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
-            info!("\n\n[MyRegisterClient {}] After replying to client\n\n", self_rank);
+            let res = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
+            info!("\n\n[MyRegisterClient {}] After replying to client with result {:?}\n\n", self_rank, res);
         });
 
         return Ok(());

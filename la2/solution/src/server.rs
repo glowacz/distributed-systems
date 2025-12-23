@@ -25,6 +25,53 @@ pub struct SharedState {
 
 // TODO: change the level of every log to trace! (maybe except new connection)
 
+// Helper to safely get or create channels atomically
+async fn get_or_create_channels(
+    state: &Arc<SharedState>,
+    sector_idx: u64
+) -> (
+    Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>, // main_tx
+    Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>, // client_tx
+    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>, // main_rx (if created)
+    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>  // client_rx (if created)
+) {
+    // 1. Fast path: Check with read locks
+    {
+        let main_map = state.main_cmd_senders.read().await;
+        let client_map = state.client_cmd_senders.read().await;
+        if let (Some(main_tx), Some(client_tx)) = (main_map.get(&sector_idx), client_map.get(&sector_idx)) {
+            return (main_tx.clone(), client_tx.clone(), None, None);
+        }
+    }
+
+    let mut main_map = state.main_cmd_senders.write().await;
+    let mut client_map = state.client_cmd_senders.write().await;
+
+    let (main_tx, main_rx) = match main_map.get(&sector_idx) {
+        Some(tx) =>  {
+            (tx.clone(), None)
+        }
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
+            main_map.insert(sector_idx, tx.clone());
+            (tx, Some(rx))
+        }
+    };
+
+    let (client_tx, client_rx) = match client_map.get(&sector_idx) {
+        Some(tx) => {
+            (tx.clone(), None)
+        }
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
+            client_map.insert(sector_idx, tx.clone());
+            (tx, Some(rx))
+        }
+    };
+
+    (main_tx, client_tx, main_rx, client_rx)
+}
+
 pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, 
     wr: Arc<Mutex<OwnedWriteHalf>>, // the wr is either for responding to the client or sending internal ACK
     // writing VAL or ACK from alogrithm is done via the permanent task in MyRegisterClient
@@ -67,37 +114,15 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                 self_addr.0, self_addr.1, cmd);
 
                             let sector_idx = cmd.header.sector_idx;
-                        
-                            let tx_opt = state.main_cmd_senders.read().await.get(&sector_idx).cloned();
-                            let (tx, rx_opt) = match tx_opt {
-                                None => {
-                                    // TODO: revisit channel capacity for all channel::<
-                                    let (tx, rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
-                                    state.main_cmd_senders.write().await.insert(sector_idx, tx.clone());
-                                    (tx.clone(), Some(rx))
-                                },
-                                Some(tx) => (tx.clone(), None)
-                            };
-                            
-                            // get or create the client queue
-                            let client_tx_opt = state.client_cmd_senders.read().await.get(&sector_idx).cloned();
-                            let (_client_tx, client_rx_opt) = match client_tx_opt {
-                                None => {
-                                    let (client_tx, client_rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
-                                        state.client_cmd_senders.write().await.insert(sector_idx, client_tx.clone());
-                                    (client_tx.clone(), Some(client_rx))
-                                },
-                                Some(client_tx) => (client_tx, None)
-                            };
+
+                            // Use atomic get_or_create logic
+                            let (tx, _client_tx, rx_opt, client_rx_opt) = get_or_create_channels(&state, sector_idx).await;
 
                             tx.send((RegisterCommand::System(cmd), None)).await.unwrap();
-                            // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
-                            if let Some(rx) = rx_opt {
-                                if let Some(client_rx) = client_rx_opt {
-                                    start_ar_worker(client.clone(), sectors_manager.clone(), sector_idx, rx, tx, client_rx).await;
-                                }
+                            
+                            // Only spawn if WE created BOTH channels (ensures exactly one worker per sector)
+                            if let (Some(rx), Some(client_rx)) = (rx_opt, client_rx_opt) {
+                                start_ar_worker(client.clone(), sectors_manager.clone(), sector_idx, rx, tx, client_rx).await;
                             }
                         },
                         RegisterCommand::Client(cmd) => {
@@ -122,31 +147,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                 self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
 
-                            // regardless of whether the map has a client queue, 
-                            // we should check if the map has the main queue, 
-                            // as this determines the task
-                            let tx_opt = state.main_cmd_senders.read().await.get(&sector_idx).cloned();
-                            let (tx, rx_opt) = match tx_opt {
-                                None => {
-                                    let (tx, rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
-                                    state.main_cmd_senders.write().await.insert(sector_idx, tx.clone());
-                                    (tx.clone(), Some(rx))
-                                },
-                                Some(tx) => (tx.clone(), None)
-                            };
-                            
-                            // get or create the client queue
-                            let client_tx_opt = state.client_cmd_senders.read().await.get(&sector_idx).cloned();
-                            let (client_tx, client_rx_opt) = match client_tx_opt {
-                                None => {
-                                    let (client_tx, client_rx) = 
-                                        tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
-                                        state.client_cmd_senders.write().await.insert(sector_idx, client_tx.clone());
-                                    (client_tx.clone(), Some(client_rx))
-                                },
-                                Some(client_tx) => (client_tx, None)
-                            };
+                            let (tx, client_tx, rx_opt, client_rx_opt) = get_or_create_channels(&state, sector_idx).await;
 
                             client_tx.send((
                                 RegisterCommand::Client(cmd), Some(wr.clone()
@@ -190,7 +191,7 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
             
             let (rd, wr) = socket.into_split();
             let protected_writer = Arc::new(Mutex::new(wr));
-            tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer, rd, client_addr.ip().to_string(), client_addr.port()).await;  
+            tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer.clone(), rd, client_addr.ip().to_string(), client_addr.port()).await;  
         }
     });
 }
