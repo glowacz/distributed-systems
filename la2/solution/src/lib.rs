@@ -1,4 +1,5 @@
 mod domain;
+pub mod stubborn_link;
 
 use std::sync::Arc;
 
@@ -110,10 +111,10 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::{ClientCommandResponse, RegisterCommand};
+    use crate::{Ack, ClientCommandResponse, RegisterCommand};
     use bincode::{config::standard, error::{DecodeError, EncodeError}, serde::{decode_from_slice, encode_to_vec}};
     use hmac::{Hmac, Mac};
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use sha2::Sha256;
     use std::io::{Error, ErrorKind};
     use tokio::io::{AsyncRead, AsyncWrite};
@@ -178,24 +179,11 @@ pub mod transfer_public {
         Ok(())
     }
 
-    // async fn deserialize_register_command_any_hmac(
-    //     data: &mut (dyn AsyncRead + Send + Unpin),
-    //     hmac_key: &[u8],
-    // ) -> Result<(RegisterCommand, bool), DecodingError> 
-
-    // pub async fn deserialize_register_command_from_client(
-    //     data: &mut (dyn AsyncRead + Send + Unpin),
-    //     hmac_client_key: &[u8; 32],
-    // ) -> Result<(RegisterCommand, bool), DecodingError> {
-    //     deserialize_register_command_any_hmac(data, hmac_client_key).await
-    // }
-
-
-    pub async fn deserialize_register_command(
+    pub async fn deserialize<T: for<'a> Deserialize<'a>>(
         data: &mut (dyn AsyncRead + Send + Unpin),
         hmac_system_key: &[u8; 64],
         hmac_client_key: &[u8; 32],
-    ) -> Result<(RegisterCommand, bool), DecodingError> {
+    ) -> Result<(T, bool), DecodingError> {
         let mut size_buf = [0u8; 8];
         data.read_exact(&mut size_buf).await.map_err(|e| DecodingError::IoError(e))?;
         let message_size = u64::from_be_bytes(size_buf) as usize;
@@ -228,11 +216,29 @@ pub mod transfer_public {
         let config = standard()
             .with_big_endian()
             .with_fixed_int_encoding();
-        let (message, _): (RegisterCommand, usize) = decode_from_slice(payload, config)
+        let (message, _): (T, usize) = decode_from_slice(payload, config)
             .map_err(|e| DecodingError::BincodeError(e))?;
 
         Ok((message, hmac_valid))
     }
+
+
+    pub async fn deserialize_register_command(
+        data: &mut (dyn AsyncRead + Send + Unpin),
+        hmac_system_key: &[u8; 64],
+        hmac_client_key: &[u8; 32],
+    ) -> Result<(RegisterCommand, bool), DecodingError> {
+        deserialize(data, hmac_system_key, hmac_client_key).await
+    }
+
+    pub async fn deserialize_internal_ack(
+        data: &mut (dyn AsyncRead + Send + Unpin),
+        hmac_system_key: &[u8; 64],
+        hmac_client_key: &[u8; 32],
+    ) -> Result<(Ack, bool), DecodingError> {
+        deserialize(data, hmac_system_key, hmac_client_key).await
+    }
+
     pub async fn serialize_register_command(
         cmd: &RegisterCommand,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
@@ -243,6 +249,14 @@ pub mod transfer_public {
 
     pub async fn serialize_client_response(
         cmd: &ClientCommandResponse,
+        writer: &mut (dyn AsyncWrite + Send + Unpin),
+        hmac_key: &[u8],
+    ) -> Result<(), EncodingError> {
+        serialize(cmd, writer, hmac_key).await
+    }
+
+    pub async fn serialize_internal_ack(
+        cmd: &Ack,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), EncodingError> {

@@ -143,6 +143,11 @@ pub enum OperationReturn {
     Write,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Ack {
+}
+
 // TODO: delete this before sending
 use std::fmt;
 
