@@ -1,0 +1,10 @@
+Task do wysyłania do danego node'a (a nie oddzielny dla każdej wiadomości):
+
+Connect
+
+Select po {
+    timeout,
+    internal Ack => wtedy bierzemy kolejną wiadomość (z channela/VecDeque)
+}
+
+send: wysyła na channela
