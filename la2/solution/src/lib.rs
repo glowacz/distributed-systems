@@ -1,5 +1,4 @@
 mod domain;
-pub mod stubborn_link;
 
 use std::sync::Arc;
 

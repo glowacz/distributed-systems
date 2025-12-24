@@ -3,6 +3,7 @@ use std::time::Duration;
 use std::{sync::Arc};
 
 use log::{info, trace, warn,};
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -20,6 +21,7 @@ pub struct MyRegisterClient {
     pub _n_sectors: u64,
     pub self_addr: (String, u16),
     to_send: Arc<Vec<Mutex<Option<Sender<RegisterCommand>>>>>,
+    pub to_send_client: Arc<RwLock<HashMap<u64, Sender<ClientCommandResponse>>>>,
 
     pub state: Arc<SharedState>
 }
@@ -48,12 +50,20 @@ impl MyRegisterClient {
             .collect()
         );
 
+        // let to_send_client: Arc<Vec<Mutex<Option<Sender<ClientCommandResponse>>>>> = Arc::new(
+        //     (0..n_nodes)
+        //     .map(|_| Mutex::new(None))
+        //     .collect()
+        // );
+
+        let to_send_client = Arc::new(RwLock::new(HashMap::new()));
+
         let state = Arc::new(SharedState {
             hmac_system_key: conf.hmac_system_key,
             hmac_client_key: conf.hmac_client_key,
             tcp_locations: conf.public.tcp_locations,
             have_connection,
-            // tcp_writers: Arc::new(RwLock::new(HashMap::new())),
+            tcp_writers: Arc::new(RwLock::new(HashMap::new())),
             main_cmd_senders: Arc::new(RwLock::new(HashMap::new())),
             client_cmd_senders: Arc::new(RwLock::new(HashMap::new())),
             sectors_manager
@@ -64,22 +74,47 @@ impl MyRegisterClient {
             _n_sectors: conf.public.n_sectors,
             self_addr,
             to_send,
+            to_send_client,
             state
         }
     }
 
-    pub async fn reply_to_client(&self, cmd: ClientCommandResponse, writer: Arc<Mutex<OwnedWriteHalf>>) -> std::io::Result<()> {
-        let hmac_key = self.state.hmac_client_key;
+    pub async fn reply_to_client(&self, cmd: ClientCommandResponse, client_id: u64) {
+        let to_send_tx_opt = self.to_send_client.read().await.get(&client_id).cloned();
+        
+        if let Some(to_send_tx) = to_send_tx_opt {
+            let _ = to_send_tx.send(cmd).await;
+        }
+        else {
+            warn!("\n\nTHERE WAS NO CHANNEL FOR SENDING RESPONSES TO THIS CLIENT\n\n");
+        }
+    }
+
+    pub async fn reply_to_client_task(&self, 
+        client_id: u64,
+        // wr: Arc<Mutex<OwnedWriteHalf>>, 
+        mut to_send_rx: Receiver<ClientCommandResponse>
+    ) {    
+        let hmac_client_key = self.state.hmac_client_key;
+        let wr = self.state.tcp_writers.read().await.get(&client_id).unwrap().clone();
 
         let self_rank = self.self_rank;
-        let _ = tokio::spawn( async move {
-            info!("[MyRegisterClient {}] Before replying to client", self_rank);
-            let mut tcp_writer = writer.lock().await;
-            let res = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
-            info!("\n\n[MyRegisterClient {}] After replying to client with result {:?}\n\n", self_rank, res);
-        });
 
-        return Ok(());
+        info!("\n\n[{self_rank}]: started task for replying to client {client_id}\n==========================================");
+
+        tokio::spawn(async move {
+            let mut tcp_writer = wr.lock().await;
+            while let Some(response) = to_send_rx.recv().await {
+                info!("\n[MyRegisterClient {}] Before replying to client {client_id}\n", self_rank);
+
+                let res = serialize_client_response(&response, &mut *tcp_writer, &hmac_client_key).await;
+                
+                let flush_res = tcp_writer.flush().await;
+                
+                info!("\n\n[MyRegisterClient {}] After replying to client {client_id} with result {:?} and flush result {:?}\n\n", self_rank, res, flush_res);
+            }
+            // tcp_writer is dropped here nicely when the sender is dropped
+        });
     }
 
     async fn sender_task(&self, target: u8, mut to_send_rx: Receiver<RegisterCommand>) {

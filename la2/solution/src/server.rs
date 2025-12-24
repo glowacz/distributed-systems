@@ -4,12 +4,12 @@ use std::{path::PathBuf, sync::Arc};
 use log::{error, info, trace,};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, channel};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::ar_worker::start_ar_worker;
 use crate::my_register_client::MyRegisterClient;
-use crate::{Ack, sectors_manager_public, serialize_internal_ack};
+use crate::{Ack, ClientCommandResponse, StatusCode, sectors_manager_public, serialize_internal_ack};
 use crate::{RegisterCommand};
 
 pub struct SharedState {
@@ -17,9 +17,9 @@ pub struct SharedState {
     pub hmac_client_key: [u8; 32],
     pub tcp_locations: Vec<(String, u16)>,
     pub have_connection: Vec<Mutex<bool>>,
-    // pub tcp_writers: Arc<RwLock<HashMap<(String, u16), Arc<Mutex<OwnedWriteHalf>>>>>, // TODO: this should be Vec<Arc<Mutex<OwnedWriteHalf>>>
-    pub main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>>>,
-    pub client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>>>,
+    pub tcp_writers: Arc<RwLock<HashMap<u64, Arc<Mutex<OwnedWriteHalf>>>>>, // TODO: this should be Vec<Arc<Mutex<OwnedWriteHalf>>>
+    pub main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, u64)>>>>,
+    pub client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, u64)>>>>,
     pub sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>
 }
 
@@ -30,12 +30,11 @@ async fn get_or_create_channels(
     state: &Arc<SharedState>,
     sector_idx: u64
 ) -> (
-    Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>, // main_tx
-    Sender<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>, // client_tx
-    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>, // main_rx (if created)
-    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>>  // client_rx (if created)
+    Sender<(RegisterCommand, u64)>, // main_tx
+    Sender<(RegisterCommand, u64)>, // client_tx
+    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, u64)>>, // main_rx (if created)
+    Option<tokio::sync::mpsc::Receiver<(RegisterCommand, u64)>>  // client_rx (if created)
 ) {
-    // 1. Fast path: Check with read locks
     {
         let main_map = state.main_cmd_senders.read().await;
         let client_map = state.client_cmd_senders.read().await;
@@ -48,11 +47,11 @@ async fn get_or_create_channels(
     let mut client_map = state.client_cmd_senders.write().await;
 
     let (main_tx, main_rx) = match main_map.get(&sector_idx) {
-        Some(tx) =>  {
+        Some(tx) => {
             (tx.clone(), None)
         }
         None => {
-            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
+            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, u64)>(1000);
             main_map.insert(sector_idx, tx.clone());
             (tx, Some(rx))
         }
@@ -63,7 +62,7 @@ async fn get_or_create_channels(
             (tx.clone(), None)
         }
         None => {
-            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, Option<Arc<Mutex<OwnedWriteHalf>>>)>(1000);
+            let (tx, rx) = tokio::sync::mpsc::channel::<(RegisterCommand, u64)>(1000);
             client_map.insert(sector_idx, tx.clone());
             (tx, Some(rx))
         }
@@ -74,9 +73,12 @@ async fn get_or_create_channels(
 
 pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, 
     wr: Arc<Mutex<OwnedWriteHalf>>, // the wr is either for responding to the client or sending internal ACK
+    // mut wr: OwnedWriteHalf, // the wr is either for responding to the client or sending internal ACK
     // writing VAL or ACK from alogrithm is done via the permanent task in MyRegisterClient
     mut rd: OwnedReadHalf,
-    client_ip: String, client_port: u16) { // reading from a single client/node
+    client_ip: String, client_port: u16,
+    client_id: u64
+) { // reading from a single client/node
 
     let hmac_key = client.state.hmac_system_key;
     
@@ -115,12 +117,10 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
 
                             let sector_idx = cmd.header.sector_idx;
 
-                            // Use atomic get_or_create logic
                             let (tx, _client_tx, rx_opt, client_rx_opt) = get_or_create_channels(&state, sector_idx).await;
 
-                            tx.send((RegisterCommand::System(cmd), None)).await.unwrap();
+                            tx.send((RegisterCommand::System(cmd), 0)).await.unwrap();
                             
-                            // Only spawn if WE created BOTH channels (ensures exactly one worker per sector)
                             if let (Some(rx), Some(client_rx)) = (rx_opt, client_rx_opt) {
                                 start_ar_worker(client.clone(), sectors_manager.clone(), sector_idx, rx, tx, client_rx).await;
                             }
@@ -143,6 +143,12 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                 return;
                             }
 
+                            if _i == 0 {
+                                let (to_send_tx, to_send_rx) = channel::<ClientCommandResponse>(1000);
+                                client.to_send_client.write().await.insert(client_id, to_send_tx.clone());
+                                client.reply_to_client_task(client_id, to_send_rx).await;
+                            }
+
                             info!("[{}:{}]: Received valid CLIENT command from ({}, {})\nCommand:{}",
                                 self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
@@ -150,8 +156,8 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             let (tx, client_tx, rx_opt, client_rx_opt) = get_or_create_channels(&state, sector_idx).await;
 
                             client_tx.send((
-                                RegisterCommand::Client(cmd), Some(wr.clone()
-                            ))).await.unwrap();
+                                RegisterCommand::Client(cmd), client_id 
+                            )).await.unwrap();
                             trace!("[{}:{}]: Sent command onto the client queue",
                             self_addr.0, self_addr.1);
 
@@ -182,16 +188,21 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
         let socket = TcpListener::bind(
             format!("{}:{}", self_addr.0, self_addr.1)
         ).await.unwrap();
+        let mut client_id: u64 = 0;
 
         trace!("Bound to socket {}:{}", self_addr.0, self_addr.1);
+        
 
         loop {
+            client_id += 1;
             let (socket, client_addr) = socket.accept().await.unwrap();
             info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
             
             let (rd, wr) = socket.into_split();
             let protected_writer = Arc::new(Mutex::new(wr));
-            tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer.clone(), rd, client_addr.ip().to_string(), client_addr.port()).await;  
+            client.state.tcp_writers.write().await.insert(client_id, protected_writer.clone());
+
+            tcp_reader_task(client.clone(), sectors_manager.clone(), protected_writer, rd, client_addr.ip().to_string(), client_addr.port(), client_id).await;  
         }
     });
 }
