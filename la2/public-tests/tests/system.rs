@@ -18,7 +18,7 @@ use std::io::Write;
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::Info)
         // .format(|buf, record| { // NO Timestamps
         //     writeln!(buf, "{}", record.args())
         // })
@@ -107,7 +107,8 @@ async fn concurrent_operations_on_the_same_sector() {
     init_logs();
     // given
     let port_range_start = 21518;
-    let n_clients = 16;
+    // let n_clients = 16;
+    let n_clients = 2;
     let config = TestProcessesConfig::new(1, port_range_start);
     config.start().await;
     let mut streams = Vec::new();

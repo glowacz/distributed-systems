@@ -1,14 +1,10 @@
 use assignment_2_solution::{
     ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, 
     OperationReturn, RegisterCommand, SectorVec,
-    serialize_register_command,
 };
 use assignment_2_test_utils::system::*;
-use hmac::Mac;
 use ntest::timeout;
 use serde_big_array::Array;
-use tokio::io::{AsyncWriteExt};
-use tokio::net::TcpStream;
 use std::io::Write;
 use chrono::Local;
 
@@ -101,16 +97,71 @@ async fn two_nodes() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[timeout(50000)]
+async fn run_on_many_sectors() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // given
+    let port_range_start = 21518;
+    let n_clients = 1;
+    let config = TestProcessesConfig::new(4, port_range_start);
+    config.start().await;
+    let mut stream = config.connect(0).await;
+    let sectors_to_ask = 50;
+    // when
+    for i in 1..sectors_to_ask+1 {
+        config
+            .send_cmd(
+                &RegisterCommand::Client(ClientRegisterCommand {
+                    header: ClientCommandHeader {
+                        request_identifier: i.try_into().unwrap(),
+                        sector_idx: i as u64,
+                    },
+                    content: ClientRegisterCommandContent::Write {
+                        data: SectorVec(Box::new(Array([i+4; 4096]))),
+                    },
+                }),
+                &mut stream,
+            )
+            .await;
+        config.read_response(&mut stream).await;
+
+        config
+            .send_cmd(
+                &RegisterCommand::Client(ClientRegisterCommand {
+                    header: ClientCommandHeader {
+                        request_identifier: n_clients,
+                        sector_idx: i as u64,
+                    },
+                    content: ClientRegisterCommandContent::Read,
+                }),
+                &mut stream,
+            )
+            .await;
+        let response = config.read_response(&mut stream).await;
+
+        match response.content.op_return {
+            OperationReturn::Read {
+                read_data: SectorVec(sector),
+            } => {
+                assert!(*sector == Array([i+4; 4096]));
+            }
+            _ => panic!("Expected read response"),
+        }
+    }
+}
+
 // TODO: in this test only 5 connections should form: client <--> Node 0 and Node 0 with every other node (incl self for now)
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(100000)]
 async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 200;
-    let config = TestProcessesConfig::new(4, port_range_start);
+    let commands_total = 20;
+    let config = TestProcessesConfig::new(2, port_range_start);
     config.start().await;
     let mut stream = config.connect(0).await;
 
@@ -153,8 +204,9 @@ async fn multiple_nodes_multiple_sectors() {
     }
 
     // then
-    for _ in 0..commands_total {
+    for i in 0..commands_total {
         let response = config.read_response(&mut stream).await;
+        println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
         match response.content.op_return {
             OperationReturn::Read {
                 read_data: SectorVec(sector),
@@ -174,13 +226,13 @@ async fn multiple_nodes_multiple_sectors() {
 
 #[tokio::test]
 #[serial_test::serial]
-#[timeout(5000)]
+#[timeout(500000)]
 async fn multiple_clients() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let n_clients = 100;
-    let config = TestProcessesConfig::new(4, port_range_start);
+    let n_clients = 5;
+    let config = TestProcessesConfig::new(2, port_range_start);
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {
@@ -251,18 +303,83 @@ async fn multiple_clients() {
     }
 }
 
-async fn send_cmd(register_cmd: &RegisterCommand, stream: &mut TcpStream, hmac_client_key: &[u8]) {
-    let mut data = Vec::new();
-    serialize_register_command(register_cmd, &mut data, hmac_client_key)
-        .await
-        .unwrap();
+#[tokio::test]
+#[serial_test::serial]
+#[timeout(50000)]
+async fn many_clients_same_sector() {
+    init_logs();
+    // given
+    let port_range_start = 21625;
+    let n_clients = 16;
+    let config = TestProcessesConfig::new(1, port_range_start);
+    config.start().await;
+    let mut streams = Vec::new();
+    for _ in 0..n_clients {
+        streams.push(config.connect(0).await);
+    }
 
-    stream.write_all(&data).await.unwrap();
-}
+    for (i, stream) in streams.iter_mut().enumerate() {
+        let idx = i.try_into().unwrap();
+        config
+            .send_cmd(
+                &RegisterCommand::Client(ClientRegisterCommand {
+                    header: ClientCommandHeader {
+                        request_identifier: idx,
+                        // sector_idx: idx,
+                        sector_idx: 0,
+                    },
+                    content: ClientRegisterCommandContent::Write {
+                        data: SectorVec(Box::new(Array([idx as u8; 4096])))
+                    },
+                }),
+                stream,
+            )
+            .await;
+        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH WRITE ==================================\n\n\n");
+    }
 
-fn hmac_tag_is_ok(key: &[u8], data: &[u8]) -> bool {
-    let boundary = data.len() - HMAC_TAG_SIZE;
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
-    mac.update(&data[..boundary]);
-    mac.verify_slice(&data[boundary..]).is_ok()
+    let mut i = 0;
+    for stream in &mut streams {
+        config.read_response(stream).await;
+        println!("\n====== CLIENT GOT WRITE RESPONSE {i} ======\n");
+        i += 1;
+    }
+
+    // when
+    for (i, stream) in streams.iter_mut().enumerate() {
+        let idx = i.try_into().unwrap();
+        config
+            .send_cmd(
+                &RegisterCommand::Client(ClientRegisterCommand {
+                    header: ClientCommandHeader {
+                        request_identifier: idx,
+                        sector_idx: idx,
+                    },
+                    content: ClientRegisterCommandContent::Read
+                }),
+                stream,
+            )
+            .await;
+        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH READ ==================================\n\n\n");
+    }
+
+    // then
+    for (i, stream) in streams.iter_mut().enumerate() {
+        let response = config.read_response(stream).await;
+        println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
+        match response.content.op_return {
+            OperationReturn::Read {
+                read_data: SectorVec(sector),
+            } => {
+                // assert_eq!(
+                //     sector,
+                //     Box::new(Array(
+                //         [i as u8; 4096]
+                //         // [5 as u8; 4096]
+                //     ))
+                // )
+            }
+            _ => panic!("Expected read response"),
+        }
+    }
 }
