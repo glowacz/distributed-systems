@@ -96,10 +96,6 @@ async fn single_process_system_completes_operations() {
     assert!(hmac_tag_is_ok(&hmac_client_key, &buf[8..]));
 }
 
-// TODO: I may have tweaked this timeout
-// but it still sometimes isn't enough for my system
-// need to investigate
-
 #[tokio::test]
 #[serial_test::serial]
 #[timeout(30000)]
@@ -107,8 +103,7 @@ async fn concurrent_operations_on_the_same_sector() {
     init_logs();
     // given
     let port_range_start = 21518;
-    // let n_clients = 16;
-    let n_clients = 2;
+    let n_clients = 16;
     let config = TestProcessesConfig::new(1, port_range_start);
     config.start().await;
     let mut streams = Vec::new();
@@ -131,19 +126,11 @@ async fn concurrent_operations_on_the_same_sector() {
                 stream,
             )
             .await;
-        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH WRITE ==================================\n\n\n");
     }
 
-    println!("\n\n\n================================== CLIENT AFTER SENDING ALL WRITES, BEFORE READ ==================================\n\n\n");
-
-    let mut i = 0;
     for stream in &mut streams {
         config.read_response(stream).await;
-        println!("\n====== CLIENT GOT WRITE RESPONSE {i} ======\n");
-        i += 1;
     }
-
-    println!("\n\n\n================================== CLIENT READ ALL RESPONSES FROM SYSTEM ==================================\n\n\n");
 
     config
         .send_cmd(
@@ -175,7 +162,7 @@ async fn concurrent_operations_on_the_same_sector() {
 async fn large_number_of_operations_execute_successfully() {
     init_logs();
     // given
-    let port_range_start = 21625;
+    let port_range_start = 21585;
     let commands_total = 32;
     let config = TestProcessesConfig::new(3, port_range_start);
     config.start().await;

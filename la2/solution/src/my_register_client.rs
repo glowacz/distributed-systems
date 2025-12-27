@@ -102,11 +102,11 @@ impl MyRegisterClient {
 
         info!("\n\n[{self_rank}]: started task for replying to client {client_id}\n==========================================");
 
-        tokio::spawn(async move {
-            let mut tcp_writer = wr.lock().await;
+        tokio::spawn(async move {    
             while let Some(response) = to_send_rx.recv().await {
                 info!("\n[MyRegisterClient {}] Before replying to client {client_id}\n", self_rank);
 
+                let mut tcp_writer = wr.lock().await;
                 let res = serialize_client_response(&response, &mut *tcp_writer, &hmac_client_key).await;
                 
                 let flush_res = tcp_writer.flush().await;

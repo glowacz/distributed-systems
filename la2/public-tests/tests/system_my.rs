@@ -311,7 +311,7 @@ async fn many_clients_same_sector() {
     // given
     let port_range_start = 21625;
     let n_clients = 16;
-    let config = TestProcessesConfig::new(1, port_range_start);
+    let config = TestProcessesConfig::new(2, port_range_start);
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {
@@ -369,7 +369,7 @@ async fn many_clients_same_sector() {
         println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
         match response.content.op_return {
             OperationReturn::Read {
-                read_data: SectorVec(sector),
+                read_data: SectorVec(_sector),
             } => {
                 // assert_eq!(
                 //     sector,

@@ -12,7 +12,6 @@ pub mod stable_storage;
 pub mod my_sectors_manager;
 pub mod my_atomic_register;
 pub mod my_register_client;
-pub mod alt_register_client;
 pub mod server;
 pub mod ar_worker;
 
@@ -21,7 +20,6 @@ pub async fn run_register_process(config: Configuration) {
     let storage_dir = config.public.storage_dir.clone();
 
     let register_client = Arc::new(MyRegisterClient::new(config).await);
-    // this is not a tokio task, but it will spawn a task for each of its operations (send/broadcast)
     let _ = start_tcp_server(register_client, self_addr, storage_dir).await;
 }
 

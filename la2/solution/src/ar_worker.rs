@@ -1,15 +1,11 @@
 use std::collections::{VecDeque};
-use std::time::Duration;
 use std::{sync::Arc};
 
 use log::{info, trace, warn,};
-use tokio::net::tcp::{OwnedWriteHalf};
 use tokio::select;
-use tokio::sync::{Mutex};
-use tokio::time::sleep;
 
 use crate::my_register_client::MyRegisterClient;
-use crate::{ClientCommandResponse, StatusCode, sectors_manager_public};
+use crate::{ClientCommandResponse, sectors_manager_public};
 use crate::{RegisterCommand, my_atomic_register::MyAtomicRegister};
 use crate::atomic_register_public::AtomicRegister;
 
@@ -18,13 +14,8 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
     tx: tokio::sync::mpsc::Sender<(RegisterCommand, u64)>,
     mut client_rx: tokio::sync::mpsc::Receiver<(RegisterCommand, u64)>
     ) {
-    // let client = Arc::new(self);
-    // let sectors_manager = sectors_manager.clone();
-
     let _ = tokio::spawn( async move {
         trace!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
-        // let client = client.clone();
-        // let sectors_manager = sectors_manager.clone();
         
         let mut processing_client = false;
         let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(1000);
@@ -69,13 +60,7 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
                             info!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
-                            processing_client = true;
-                            // let tcp_writer_clone = tcp_writer.clone();
-                            // let writer = match writer_opt {
-                            //     Some(w) => w,
-                            //     None => continue,
-                            // };
-                            let client_clone = client.clone();                    
+                            processing_client = true;                  
                             let tx_client_done_clone = tx_client_done.clone();
         
                             let success_callback: Box<
@@ -84,25 +69,12 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                     + Sync,
                             > = Box::new(move |response: ClientCommandResponse| {
                                 Box::pin(async move {
-                                    // let writer = writer.clone();
-                                    trace!("Callback will send response: {:?} to client", response);
-                                    // let _ = client_clone.reply_to_client(response, writer.clone()).await;
-                                    // let _ = client_clone.reply_to_client(response, client_id).await;
-                                    info!("Callback SENT response to client {client_id}");
-                                    // let _ = tx_client_done_clone.send(()).await;
                                     let _ = tx_client_done_clone.send((response, client_id)).await;
                                     trace!("Callback sent information that we're done with this client onto the queue");
                                 })
                             });
                             register.client_command(cmd.clone(), success_callback).await;
                             trace!("[AR worker {}, {}]: fully delivered CLIENT command to AR struct", client.self_rank, sector_idx);
-                            
-                            // let response = ClientCommandResponse {
-                            //     status: StatusCode::Ok,
-                            //     request_identifier: cmd.header.request_identifier,
-                            //     op_return: crate::OperationReturn::Write
-                            // };
-                            // let _ = client_clone.reply_to_client(response, writer.clone()).await;
                         },
                         RegisterCommand::System(cmd) => {
                             register.system_command(cmd).await;
@@ -113,7 +85,6 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                 opt = rx_client_done.recv() => {
                     info!("[AR worker {}, {}]: finished processing whole client request", client.self_rank, sector_idx);
                     processing_client = false;
-                    // sleep(Duration::from_secs(25)).await;
                     if let Some((response, client_id)) = opt {
                         let _ = client.reply_to_client(response, client_id).await;
                     }

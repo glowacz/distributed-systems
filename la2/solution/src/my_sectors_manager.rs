@@ -3,7 +3,7 @@ use crate::{SectorIdx, SectorVec};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::stable_storage::{MyStableStorage, StableStorage, build_my_stable_storage};
-use log::{warn, debug};
+use log::{debug};
 use serde_big_array::Array;
 use tokio::fs::read_dir;
 use tokio::sync::{Mutex, RwLock};
@@ -24,7 +24,6 @@ impl MySectorsManager {
 
     pub async fn startup(&mut self) {
         let mut dir_entries = read_dir(&self.path).await.unwrap();
-        // let dir: File = File::open(&self.path).await.unwrap();
 
         while let Some(dir_entry) = dir_entries.next_entry().await.unwrap() {
             let file_path = dir_entry.path();
@@ -63,7 +62,7 @@ impl SectorsManager for MySectorsManager {
     async fn read_data(&self, idx: SectorIdx) -> SectorVec {
         let file_name = match self.idx_map.read().await.get(&idx).cloned() {
             None => {
-                debug!("\n\nTHERE WAS NO DATA FOR SECTOR {}\n\n", idx);
+                debug!("There was no data for sector {} (it will be written for the first time)", idx);
                 return SectorVec(Box::new(Array([0u8; 4096])));
             },
             Some((name, _ts, _wr)) => name,
@@ -75,7 +74,6 @@ impl SectorsManager for MySectorsManager {
     }
 
     async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8) {
-        // let file_name = self.idx_map.get(&idx).unwrap();
         let file_name_opt = self.idx_map.read().await.get(&idx).cloned();
         match file_name_opt {
             None => return (0, 0),

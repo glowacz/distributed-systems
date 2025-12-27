@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::ar_worker::start_ar_worker;
 use crate::my_register_client::MyRegisterClient;
-use crate::{Ack, ClientCommandResponse, StatusCode, sectors_manager_public, serialize_internal_ack};
+use crate::{Ack, ClientCommandResponse, sectors_manager_public, serialize_internal_ack};
 use crate::{RegisterCommand};
 
 pub struct SharedState {
