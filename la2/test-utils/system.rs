@@ -113,18 +113,18 @@ impl TestProcessesConfig {
     #[allow(clippy::missing_panics_doc)]
     pub async fn read_response(&self, stream: &mut TcpStream) -> RegisterResponse {
         // Decode response by hand to avoid leaking solution
-        trace!("\n================== read_response, BEFORE reading size ==================\n\n");
+        // trace!("\n================== read_response, BEFORE reading size ==================\n\n");
         let size = stream.read_u64().await.unwrap();
-        trace!("\n================== read_response, BEFORE reading status code ==================\n\n");
+        // trace!("\n================== read_response, BEFORE reading status code ==================\n\n");
         let status = match stream.read_u32().await.unwrap() {
             0 => StatusCode::Ok,
             1 => StatusCode::AuthFailure,
             2 => StatusCode::InvalidSectorIndex,
             _ => panic!("Invalide status code"),
         };
-        trace!("\n================== read_response, BEFORE reading req_id ==================\n\n");
+        // trace!("\n================== read_response, BEFORE reading req_id ==================\n\n");
         let req_id = stream.read_u64().await.unwrap();
-        trace!("\n================== read_response, BEFORE reading op_type ==================\n\n");
+        // trace!("\n================== read_response, BEFORE reading op_type ==================\n\n");
         let op_type = stream.read_u32().await.unwrap();
         let op_return = match op_type {
             0 => {
@@ -146,9 +146,9 @@ impl TestProcessesConfig {
             }
         );
         let mut tag = [0x00_u8; HMAC_TAG_SIZE];
-        trace!("\n================== read_response, BEFORE reading tag ==================\n\n");
+        // trace!("\n================== read_response, BEFORE reading tag ==================\n\n");
         stream.read_exact(&mut tag).await.unwrap();
-        trace!("\n================== read_response, AFTER reading tag ==================\n\n");
+        // trace!("\n================== read_response, AFTER reading tag ==================\n\n");
         RegisterResponse {
             content: ClientCommandResponse {
                 status,

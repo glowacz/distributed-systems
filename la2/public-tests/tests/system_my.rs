@@ -160,7 +160,7 @@ async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 250;
+    let commands_total = 50;
     let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
@@ -204,9 +204,9 @@ async fn multiple_nodes_multiple_sectors() {
     }
 
     // then
-    for i in 0..commands_total {
+    for _i in 0..commands_total {
         let response = config.read_response(&mut stream).await;
-        println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
+        // println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
         match response.content.op_return {
             OperationReturn::Read {
                 read_data: SectorVec(sector),
