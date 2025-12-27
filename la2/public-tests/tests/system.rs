@@ -8,6 +8,7 @@ use assignment_2_test_utils::transfer::PacketBuilder;
 use hmac::Mac;
 use ntest::timeout;
 use serde_big_array::Array;
+use tokio::time::sleep;
 use std::convert::TryInto;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -18,7 +19,7 @@ use std::io::Write;
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(log::LevelFilter::Warn)
         // .format(|buf, record| { // NO Timestamps
         //     writeln!(buf, "{}", record.args())
         // })
@@ -104,7 +105,7 @@ async fn concurrent_operations_on_the_same_sector() {
     // given
     let port_range_start = 21518;
     let n_clients = 16;
-    let config = TestProcessesConfig::new(1, port_range_start);
+    let config = TestProcessesConfig::new(1, port_range_start).await;
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {
@@ -154,6 +155,8 @@ async fn concurrent_operations_on_the_same_sector() {
         }
         _ => panic!("Expected read response"),
     }
+
+    // sleep(Duration::from_millis(500)).await;
 }
 
 #[tokio::test]
@@ -164,7 +167,7 @@ async fn large_number_of_operations_execute_successfully() {
     // given
     let port_range_start = 21585;
     let commands_total = 32;
-    let config = TestProcessesConfig::new(3, port_range_start);
+    let config = TestProcessesConfig::new(3, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(2).await;
 

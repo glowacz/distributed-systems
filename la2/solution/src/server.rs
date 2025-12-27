@@ -1,7 +1,8 @@
 use std::collections::{HashMap};
+use std::io::ErrorKind;
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info, trace,};
+use log::{error, info, trace, warn,};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener};
 use tokio::sync::mpsc::{Sender, channel};
@@ -9,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::ar_worker::start_ar_worker;
 use crate::my_register_client::MyRegisterClient;
-use crate::{Ack, ClientCommandResponse, sectors_manager_public, serialize_internal_ack};
+use crate::{Ack, ClientCommandResponse, DecodingError, sectors_manager_public, serialize_internal_ack};
 use crate::{RegisterCommand};
 
 pub struct SharedState {
@@ -87,10 +88,10 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
         let state = client.state.clone();
 
         for _i in 0.. {
-            trace!("[{}:{}]: ready to read and deserialize next message", self_addr.0, self_addr.1);
+            trace!("[{}:{} with {client_id}]: ready to read and deserialize next message", self_addr.0, self_addr.1);
             let deserialize_res = crate::deserialize_register_command(
                 &mut rd, &state.hmac_system_key, &state.hmac_client_key).await;
-            // trace!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
+            // warn!("[{}:{}]: Deserialized message, result {:?}", self_addr.0, self_addr.1, deserialize_res);
             trace!("[{}:{}]: Deserialized message", self_addr.0, self_addr.1);
             match deserialize_res {
                 Ok((recv_cmd, hmac_valid)) => {
@@ -171,7 +172,19 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     }
                 },
                 Err(e) => {
-                    error!("[{}:{}]: Could not deserialize SYSTEM command: {:?}", self_addr.0, self_addr.1, e);
+                    // error!("[{}:{}]: Could not deserialize a command: {:?}", self_addr.0, self_addr.1, e);
+                    
+                    match e {
+                        DecodingError::IoError(io_err) if io_err.kind() == ErrorKind::UnexpectedEof => {
+                            warn!("[{}:{} with {client_id}]: Client {}:{} disconnected (EOF).", 
+                                self_addr.0, self_addr.1, client_ip, client_port);
+                        },
+                        _ => {
+                            error!("[{}:{} with {client_id}]: Error reading from {}:{}: {:?}", 
+                                self_addr.0, self_addr.1, client_ip, client_port, e);
+                        }
+                    }
+
                     return;
                 },
             }

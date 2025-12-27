@@ -35,7 +35,7 @@ async fn two_nodes() {
     // given
     let port_range_start = 21625;
     let commands_total = 1;
-    let config = TestProcessesConfig::new(2, port_range_start);
+    let config = TestProcessesConfig::new(2, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
 
@@ -105,7 +105,7 @@ async fn run_on_many_sectors() {
     // given
     let port_range_start = 21518;
     let n_clients = 1;
-    let config = TestProcessesConfig::new(4, port_range_start);
+    let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
     let sectors_to_ask = 50;
@@ -160,8 +160,8 @@ async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 20;
-    let config = TestProcessesConfig::new(2, port_range_start);
+    let commands_total = 250;
+    let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
 
@@ -232,7 +232,7 @@ async fn multiple_clients() {
     // given
     let port_range_start = 21625;
     let n_clients = 5;
-    let config = TestProcessesConfig::new(2, port_range_start);
+    let config = TestProcessesConfig::new(2, port_range_start).await;
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {
@@ -311,7 +311,7 @@ async fn many_clients_same_sector() {
     // given
     let port_range_start = 21625;
     let n_clients = 16;
-    let config = TestProcessesConfig::new(2, port_range_start);
+    let config = TestProcessesConfig::new(2, port_range_start).await;
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {

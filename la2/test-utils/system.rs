@@ -11,7 +11,7 @@ use serde_big_array::Array;
 use sha2::Sha256;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
 pub const HMAC_TAG_SIZE: usize = 32;
@@ -28,25 +28,41 @@ pub struct TestProcessesConfig {
     tcp_locations: Vec<(String, u16)>,
 }
 
+async fn get_free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 impl TestProcessesConfig {
     pub const N_SECTORS: u64 = 65536;
 
     #[allow(clippy::missing_panics_doc, clippy::must_use_candidate)]
-    pub fn new(processes_count: usize, port_range_start: u16) -> Self {
+    pub async fn new(processes_count: usize, _port_range_start: u16) -> Self {
+        // let mut ports = Vec::new();
+        // for _i in 0..processes_count {
+        //     ports.push(get_free_port().await);
+        // }
+        let tcp_locations = (0..processes_count)
+            .map(|idx| {
+                (
+                    "localhost".to_string(),
+                    _port_range_start + u16::try_from(idx).unwrap(),
+                    // ports[idx]
+                )
+            })
+            .collect();
+
         TestProcessesConfig {
             hmac_client_key: (0..32).map(|_| rand::rng().random_range(0..255)).collect(),
             hmac_system_key: (0..64).map(|_| rand::rng().random_range(0..255)).collect(),
             storage_dirs: (0..processes_count)
                 .map(|_| tempfile::tempdir().unwrap())
                 .collect(),
-            tcp_locations: (0..processes_count)
-                .map(|idx| {
-                    (
-                        "localhost".to_string(),
-                        port_range_start + u16::try_from(idx).unwrap(),
-                    )
-                })
-                .collect(),
+            tcp_locations
         }
     }
 
