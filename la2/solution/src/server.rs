@@ -2,15 +2,16 @@ use std::collections::{HashMap};
 use std::io::ErrorKind;
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info, trace, warn,};
+use log::{error, info, trace,};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener};
 use tokio::sync::mpsc::{Sender, channel};
 use tokio::sync::{Mutex, RwLock};
+use serde_big_array::Array;
 
 use crate::ar_worker::start_ar_worker;
 use crate::my_register_client::MyRegisterClient;
-use crate::{Ack, ClientCommandResponse, DecodingError, sectors_manager_public, serialize_internal_ack};
+use crate::{Ack, ClientCommandResponse, ClientRegisterCommandContent, DecodingError, SECTOR_SIZE, SectorVec, sectors_manager_public, serialize_internal_ack};
 use crate::{RegisterCommand};
 
 pub struct SharedState {
@@ -100,8 +101,9 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             if !hmac_valid {
                                 error!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
                                     self_addr.0, self_addr.1, cmd);
-                                // let (peer_ip, peer_port) = client.state.tcp_locations[(cmd.header.process_identifier - 1) as usize].clone();
                                 // we don't want to read from this guy anymore
+                                // he tried to impersonate a system node, so he won't even get
+                                // StatusCode::AuthFailure
                                 // (though we still allow him to connect again)
                                 return;
                             }
@@ -130,27 +132,43 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             }
                         },
                         RegisterCommand::Client(cmd) => {
-                            if !hmac_valid {
-                                error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
-                                self_addr.0, self_addr.1, cmd);
-                                // let reply_cmd = Arc::new(
-                                //     ClientCommandResponse { 
-                                //         status: crate::StatusCode::AuthFailure, 
-                                //         request_identifier: cmd.header.request_identifier,
-                                //         op_return: crate::OperationReturn::Write
-                                //     }
-                                // );
-                                // client.reply_to_client(reply_cmd, wr).await;
-
-                                // we don't want to talk read from guy anymore
-                                // (though we still allow him to connect again)
-                                return;
-                            }
-
                             if _i == 0 {
                                 let (to_send_tx, to_send_rx) = channel::<ClientCommandResponse>(1000);
                                 client.to_send_client.write().await.insert(client_id, to_send_tx.clone());
                                 client.reply_to_client_task(client_id, to_send_rx).await;
+                            }
+
+                            if !hmac_valid {
+                                error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
+                                self_addr.0, self_addr.1, cmd);
+                                let reply_cmd =
+                                    ClientCommandResponse { 
+                                        status: crate::StatusCode::AuthFailure, 
+                                        request_identifier: cmd.header.request_identifier,
+                                        op_return: match cmd.content {
+                                            ClientRegisterCommandContent::Write { data: _ } => crate::OperationReturn::Write,
+                                            ClientRegisterCommandContent::Read => crate::OperationReturn::Read { read_data: SectorVec(Box::new(Array([0; SECTOR_SIZE]))) }
+                                        }
+                                    };
+                                client.reply_to_client(reply_cmd, client_id).await;
+                                return;
+                            }
+
+                            if cmd.header.sector_idx >= client._n_sectors {
+                                error!("[{}:{}]: Received CLIENT command with sector_idx ({}) exceeding n_sectors ({})",
+                                self_addr.0, self_addr.1, cmd.header.sector_idx, client._n_sectors);
+                                let reply_cmd =
+                                    ClientCommandResponse { 
+                                        status: crate::StatusCode::InvalidSectorIndex, 
+                                        request_identifier: cmd.header.request_identifier,
+                                        op_return: match cmd.content {
+                                            ClientRegisterCommandContent::Write { data: _ } => crate::OperationReturn::Write,
+                                            ClientRegisterCommandContent::Read => crate::OperationReturn::Read { read_data: SectorVec(Box::new(Array([0; SECTOR_SIZE]))) }
+                                        }
+                                    };
+                                client.reply_to_client(reply_cmd, client_id).await;
+                                
+                                continue;
                             }
 
                             info!("[{}:{}]: Received valid CLIENT command from ({}, {})\nCommand:{}",
@@ -176,12 +194,10 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                         }
                     }
                 },
-                Err(e) => {
-                    // error!("[{}:{}]: Could not deserialize a command: {:?}", self_addr.0, self_addr.1, e);
-                    
+                Err(e) => {                    
                     match e {
                         DecodingError::IoError(io_err) if io_err.kind() == ErrorKind::UnexpectedEof => {
-                            warn!("[{}:{} with {client_id}]: Client {}:{} disconnected (EOF).", 
+                            info!("[{}:{} with {client_id}]: Client {}:{} disconnected (EOF).", 
                                 self_addr.0, self_addr.1, client_ip, client_port);
                         },
                         _ => {

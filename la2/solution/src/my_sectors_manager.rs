@@ -1,5 +1,5 @@
 use crate::sectors_manager_public::SectorsManager;
-use crate::{SectorIdx, SectorVec};
+use crate::{SECTOR_SIZE, SectorIdx, SectorVec};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,7 +65,7 @@ impl SectorsManager for MySectorsManager {
         let file_name = match self.idx_map.read().await.get(&idx).cloned() {
             None => {
                 debug!("There was no data for sector {} (it will be written for the first time)", idx);
-                return SectorVec(Box::new(Array([0u8; 4096])));
+                return SectorVec(Box::new(Array([0u8; SECTOR_SIZE])));
             },
             Some((name, _ts, _wr)) => name,
         };
