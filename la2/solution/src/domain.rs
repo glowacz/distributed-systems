@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -146,6 +147,12 @@ pub enum OperationReturn {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Ack {
+    pub msg_ident: Uuid
+}
+
+pub struct PendingMessage {
+    pub cmd: RegisterCommand,
+    pub last_sent: Instant,
 }
 
 // TODO: delete this before sending

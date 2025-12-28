@@ -2,17 +2,18 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::{sync::Arc};
 
-use log::{info, trace, warn,};
+use log::{debug, info, trace, warn, error};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::time::{sleep};
+use tokio::time::{Instant, interval, sleep};
 use tokio::{select};
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use crate::server::{SharedState};
-use crate::{ClientCommandResponse, build_sectors_manager, deserialize_internal_ack, serialize_client_response};
+use crate::{Ack, ClientCommandResponse, PendingMessage, build_sectors_manager, deserialize_internal_ack, serialize_client_response};
 use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, register_client_public, serialize_register_command};
 
 #[derive(Clone)]
@@ -122,70 +123,121 @@ impl MyRegisterClient {
         let hmac_client_key = self.state.hmac_client_key;
         let (ip, port) = self.state.tcp_locations[(target - 1) as usize].clone();
         let self_rank = self.self_rank;
-        // let to_send = self.to_send[(self_rank - 1) as usize];
-
+    
         let _ = tokio::spawn(async move {
             let retry_period = Duration::from_millis(1000);
-            let mut tcp_stream: Option<(OwnedReadHalf, OwnedWriteHalf)> = None;
-
-            while let Some(cmd) = to_send_rx.recv().await {
+            let mut pending_messages: HashMap<Uuid, PendingMessage> = HashMap::new();
+            let mut retry_ticker = interval(Duration::from_millis(1000));
+            
+            loop {
+                let tcp_stream: Option<(OwnedReadHalf, OwnedWriteHalf)>;
+    
+                trace!("[{}]: connecting to node {} ({}:{})...", self_rank, target, ip, port);
                 loop {
-                    // stubborn connect, without connection sending and waiting for ACKs
-                    // don't make sense
-                    if tcp_stream.is_none() {
-                        info!("[{}]: connecting to node {} ({}:{})...", self_rank, target, ip, port);
-                        loop {
-                            match TcpStream::connect(format!("{}:{}", ip, port)).await {
-                                Ok(s) => {
-                                    info!("[{}]: connected to node {} ({}:{})", self_rank, target, ip, port);
-                                    tcp_stream = Some(s.into_split());
-                                    break;
-                                }
-                                Err(e) => {
-                                    info!("[{}]: failed to connect to node {}, error: {}, retrying...", self_rank, target, e);
-                                    sleep(retry_period).await;
-                                }
-                            }
+                    match TcpStream::connect(format!("{}:{}", ip, port)).await {
+                        Ok(s) => {
+                            trace!("[{}]: connected to node {} ({}:{})", self_rank, target, ip, port);
+                            tcp_stream = Some(s.into_split());
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("[{}]: failed to connect to {}, error: {}, retrying...", self_rank, target, e);
+                            sleep(retry_period).await;
                         }
                     }
-                    else {
-                        // info!("[{}]: there was TCP connection (for sending) with node {} ({}:{})...", self_rank, target, ip, port);
-                    }
+                }
+    
+                let (mut rd, mut wr) = tcp_stream.unwrap();
+                let mut connection_active = true;
 
-                    let (rd_ack, wr) = tcp_stream.as_mut().unwrap();
-                    // info!("[{}]: connected to node {} ({}:{})", self_rank, target, ip.clone(), port);
+                let (ack_tx, mut ack_rx) = channel::<(Ack, bool)>(100);
 
-                    if let Err(e) = serialize_register_command(&cmd, wr, &hmac_system_key).await {
-                        info!("[{}]: failed to write to node {}: error {:?}, reconnecting...", self_rank, target, e);
-                        tcp_stream = None;
-                        sleep(retry_period).await;
-                        continue; // Retrying in next loop turn (reconnect -> resend)
-                    }
-                    else {
-                        trace!("[{}]: sent message to node {} ({}:{})...", self_rank, target, ip, port);
-                        // break; // for turning off ACKs
-                    }
-
-                    info!("[{}]: going into SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
-
-                    select! {
-                        biased;
-
-                        res = deserialize_internal_ack(rd_ack, &hmac_system_key, &hmac_client_key) => {
-                            if let Err(_e) = res {
-                                warn!("[{}]: error getting ACK from node {} ({}{})", self_rank, target, ip.clone(), port);
-                                tcp_stream = None;
+                // task for reading ACKs (couldn't do deserialize_internal_ack in select! 
+                // as receiving other events would cancel this future in the middle of reading from client)
+                let _ = tokio::spawn(async move {
+                    loop {
+                        match deserialize_internal_ack(&mut rd, &hmac_system_key, &hmac_client_key).await {
+                            Ok(ack) => {
+                                if ack_tx.send(ack).await.is_err() {
+                                    // when the main loop goes to the next iteration
+                                    // due to connection_active == false
+                                    // and we lose ack_tx, we need to break out of this task
+                                    // this may happen if peer dies after sending ACK and
+                                    // to_send_rx.recv() is scheduled before this ack_tx.send
+                                    break;
+                                }
                             }
-                            else {
-                                trace!("[{}]: got ACK from node {} ({}:{}))", self_rank, target, ip, port);
+                            Err(_) => {
                                 break;
                             }
                         }
-                        _ = sleep(retry_period) => {
-                            info!("[{}]: timeout waiting for ACK from node {}({}{}), resending...", self_rank, target, ip.clone(), port);
+                    }
+                });
+    
+                for (id, pending) in pending_messages.iter_mut() {
+                    trace!("[{}]: resending pending message {} to node {} after reconnect...", self_rank, id, target);
+                    if let Err(e) = serialize_register_command(&pending.cmd, &mut wr, &hmac_system_key).await {
+                        warn!("[{}]: failed to resend pending message: {:?}", self_rank, e);
+                        connection_active = false;
+                        break;
+                    }
+                    pending.last_sent = Instant::now();
+                }
+    
+                while connection_active {
+                    select! {
+                        Some(cmd) = to_send_rx.recv() => {
+                            let msg_id = match cmd.clone() {
+                                RegisterCommand::System(sys_cmd) => {
+                                    sys_cmd.header.msg_ident
+                                }
+                                RegisterCommand::Client(_) => {
+                                    error!("[{}]: RECEIVED CLIENT COMMAND TO SEND IN A SYSTEM TASK\n\n\n", self_rank);
+                                    Uuid::new_v4()
+                                }
+                            };
+                            
+                            if let Err(e) = serialize_register_command(&cmd, &mut wr, &hmac_system_key).await {
+                                info!("[{}]: failed to send new message to {}: {:?}, reconnecting...", self_rank, target, e);
+                                connection_active = false;
+                            } else {
+                                trace!("[{}]: sent message {} to node {}...", self_rank, msg_id, target);
+                            }
+                            pending_messages.insert(msg_id, PendingMessage { 
+                                cmd, 
+                                last_sent: Instant::now(), 
+                            });
+                        }
+    
+                        res = ack_rx.recv() => {
+                            match res {
+                                Some(res) => {
+                                    let (ack, _valid_hmac) = res;
+                                    pending_messages.remove(&ack.msg_ident);
+                                }
+                                None => {
+                                    info!("[{} with {}]: Reader task died, reconnecting...", self_rank, target);
+                                    connection_active = false;
+                                }
+                            }
+                        }
+    
+                        _ = retry_ticker.tick() => {
+                            debug!("[{} with {}]: received tick for retrying sending", self_rank, target);
+                            let now = Instant::now();
+                            for (id, pending) in pending_messages.iter_mut() {
+                                if now.duration_since(pending.last_sent) > retry_period {
+                                    debug!("[{}]: timeout waiting for ACK {} from node {}, resending...", self_rank, id, target);
+                                    if let Err(e) = serialize_register_command(&pending.cmd, &mut wr, &hmac_system_key).await {
+                                        info!("[{}]: failed to retry message {}: {:?}, reconnecting...", self_rank, id, e);
+                                        connection_active = false;
+                                        break;
+                                    }
+                                    pending.last_sent = now;
+                                }
+                            }
                         }
                     }
-                    info!("[{}]: after SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
                 }
             }
         });

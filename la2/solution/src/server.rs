@@ -111,7 +111,10 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             
                             let mut writer = wr.lock().await;
                             // let _ = serialize_client_response(&cmd, &mut *tcp_writer, &hmac_key).await;
-                            let _ = serialize_internal_ack(&Ack{}, &mut *writer, &hmac_key).await;
+                            let ack = Ack {
+                                msg_ident: cmd.header.msg_ident
+                            };
+                            let _ = serialize_internal_ack(&ack, &mut *writer, &hmac_key).await;
 
                             trace!("[{}:{}]: Sent ACK for command {}",
                                 self_addr.0, self_addr.1, cmd);
