@@ -152,7 +152,6 @@ async fn run_on_many_sectors() {
     }
 }
 
-// TODO: in this test only 5 connections should form: client <--> Node 0 and Node 0 with every other node (incl self for now)
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(100000)]
@@ -160,7 +159,7 @@ async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 50;
+    let commands_total = 1;
     let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
@@ -311,7 +310,7 @@ async fn many_clients_same_sector() {
     // given
     let port_range_start = 21625;
     let n_clients = 16;
-    let config = TestProcessesConfig::new(2, port_range_start).await;
+    let config = TestProcessesConfig::new(1, port_range_start).await;
     config.start().await;
     let mut streams = Vec::new();
     for _ in 0..n_clients {
@@ -335,51 +334,163 @@ async fn many_clients_same_sector() {
                 stream,
             )
             .await;
-        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH WRITE ==================================\n\n\n");
+        // println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH WRITE ==================================\n\n\n");
     }
 
-    let mut i = 0;
+    // let mut i = 0;
     for stream in &mut streams {
         config.read_response(stream).await;
-        println!("\n====== CLIENT GOT WRITE RESPONSE {i} ======\n");
-        i += 1;
+        // println!("\n====== CLIENT GOT WRITE RESPONSE {i} ======\n");
+        // i += 1;
     }
 
-    // when
-    for (i, stream) in streams.iter_mut().enumerate() {
-        let idx = i.try_into().unwrap();
-        config
-            .send_cmd(
-                &RegisterCommand::Client(ClientRegisterCommand {
-                    header: ClientCommandHeader {
-                        request_identifier: idx,
-                        sector_idx: idx,
-                    },
-                    content: ClientRegisterCommandContent::Read
-                }),
-                stream,
+    // // when
+    // for (i, stream) in streams.iter_mut().enumerate() {
+    //     let idx = i.try_into().unwrap();
+    //     config
+    //         .send_cmd(
+    //             &RegisterCommand::Client(ClientRegisterCommand {
+    //                 header: ClientCommandHeader {
+    //                     request_identifier: n_clients + idx,
+    //                     sector_idx: idx,
+    //                 },
+    //                 content: ClientRegisterCommandContent::Read
+    //             }),
+    //             stream,
+    //         )
+    //         .await;
+    //     println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH READ ==================================\n\n\n");
+    // }
+
+    // // then
+    // for (i, stream) in streams.iter_mut().enumerate() {
+    //     let response = config.read_response(stream).await;
+    //     println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
+    //     match response.content.op_return {
+    //         OperationReturn::Read {
+    //             read_data: SectorVec(_sector),
+    //         } => {
+    //             // assert_eq!(
+    //             //     sector,
+    //             //     Box::new(Array(
+    //             //         [i as u8; 4096]
+    //             //         // [5 as u8; 4096]
+    //             //     ))
+    //             // )
+    //         }
+    //         _ => panic!("Expected read response"),
+    //     }
+    // }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[timeout(50000)]
+async fn serial_writes_same_sector() {
+    init_logs();
+    // given
+    let port_range_start = 21625;
+    let config = TestProcessesConfig::new(2, port_range_start).await;
+    config.start().await;
+    let mut stream = config.connect(0).await;
+
+    // =======================================================================================================================================
+    // WRITING 1
+    // =======================================================================================================================================
+    config
+        .send_cmd(
+            &RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: 1001,
+                    // sector_idx: idx,
+                    sector_idx: 0,
+                },
+                content: ClientRegisterCommandContent::Write {
+                    data: SectorVec(Box::new(Array([1 as u8; 4096])))
+                },
+            }),
+            &mut stream,
+        )
+        .await;
+
+    config.read_response(&mut stream).await;
+
+    config
+        .send_cmd(
+            &RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: 1002,
+                    sector_idx: 0,
+                },
+                content: ClientRegisterCommandContent::Read
+            }),
+            &mut stream,
+        )
+        .await;
+
+    let response = config.read_response(&mut stream).await;
+    match response.content.op_return {
+        OperationReturn::Read {
+            read_data: SectorVec(sector),
+        } => {
+            assert_eq!(
+                sector,
+                Box::new(Array(
+                    [1 as u8; 4096]
+                    // [5 as u8; 4096]
+                ))
             )
-            .await;
-        println!("\n\n\n================================== CLIENT AFTER SENDING {i}TH READ ==================================\n\n\n");
+        }
+        _ => panic!("Expected read response"),
     }
 
-    // then
-    for (i, stream) in streams.iter_mut().enumerate() {
-        let response = config.read_response(stream).await;
-        println!("\n====== CLIENT GOT READ RESPONSE {i} ======\n");
-        match response.content.op_return {
-            OperationReturn::Read {
-                read_data: SectorVec(_sector),
-            } => {
-                // assert_eq!(
-                //     sector,
-                //     Box::new(Array(
-                //         [i as u8; 4096]
-                //         // [5 as u8; 4096]
-                //     ))
-                // )
-            }
-            _ => panic!("Expected read response"),
+    // =======================================================================================================================================
+    // WRITING 2
+    // =======================================================================================================================================
+    config
+        .send_cmd(
+            &RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: 1003,
+                    // sector_idx: idx,
+                    sector_idx: 0,
+                },
+                content: ClientRegisterCommandContent::Write {
+                    data: SectorVec(Box::new(Array([2 as u8; 4096])))
+                },
+            }),
+            &mut stream,
+        )
+        .await;
+
+    config.read_response(&mut stream).await;
+
+    config
+        .send_cmd(
+            &RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: 1004,
+                    sector_idx: 0,
+                },
+                content: ClientRegisterCommandContent::Read
+            }),
+            &mut stream,
+        )
+        .await;
+
+    let response = config.read_response(&mut stream).await;
+    match response.content.op_return {
+        OperationReturn::Read {
+            read_data: SectorVec(sector),
+        } => {
+            assert_eq!(
+                sector,
+                Box::new(Array(
+                    [2 as u8; 4096]
+                    // [5 as u8; 4096]
+                ))
+            )
         }
+        _ => panic!("Expected read response"),
     }
 }

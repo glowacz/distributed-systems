@@ -155,7 +155,6 @@ pub struct PendingMessage {
     pub last_sent: Instant,
 }
 
-// TODO: delete this before sending
 use std::fmt;
 
 impl fmt::Display for RegisterCommand {

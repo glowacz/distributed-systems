@@ -19,7 +19,7 @@ pub struct SharedState {
     pub hmac_client_key: [u8; 32],
     pub tcp_locations: Vec<(String, u16)>,
     pub have_connection: Vec<Mutex<bool>>,
-    pub tcp_writers: Arc<RwLock<HashMap<u64, Arc<Mutex<OwnedWriteHalf>>>>>, // TODO: this should be Vec<Arc<Mutex<OwnedWriteHalf>>>
+    pub tcp_writers: Arc<RwLock<HashMap<u64, Arc<Mutex<OwnedWriteHalf>>>>>,
     pub main_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, u64)>>>>,
     pub client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, u64)>>>>,
     pub sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>

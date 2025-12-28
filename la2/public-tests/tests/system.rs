@@ -101,9 +101,8 @@ async fn single_process_system_completes_operations() {
 #[serial_test::serial]
 #[timeout(30000)]
 async fn concurrent_operations_on_the_same_sector() {
-    init_logs();
     // given
-    let port_range_start = 21518;
+    let port_range_start = 22718;
     let n_clients = 16;
     let config = TestProcessesConfig::new(1, port_range_start).await;
     config.start().await;
@@ -155,8 +154,6 @@ async fn concurrent_operations_on_the_same_sector() {
         }
         _ => panic!("Expected read response"),
     }
-
-    // sleep(Duration::from_millis(500)).await;
 }
 
 #[tokio::test]
