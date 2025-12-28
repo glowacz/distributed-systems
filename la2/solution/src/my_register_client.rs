@@ -150,7 +150,7 @@ impl MyRegisterClient {
                 let (mut rd, mut wr) = tcp_stream.unwrap();
                 let mut connection_active = true;
 
-                let (ack_tx, mut ack_rx) = channel::<(Ack, bool)>(100);
+                let (ack_tx, mut ack_rx) = channel::<(Ack, bool)>(1000);
 
                 // task for reading ACKs (couldn't do deserialize_internal_ack in select! 
                 // as receiving other events would cancel this future in the middle of reading from client)
@@ -186,6 +186,21 @@ impl MyRegisterClient {
     
                 while connection_active {
                     select! {
+                        biased;
+
+                        res = ack_rx.recv() => {
+                            match res {
+                                Some(res) => {
+                                    let (ack, _valid_hmac) = res;
+                                    pending_messages.remove(&ack.msg_ident);
+                                }
+                                None => {
+                                    info!("[{} with {}]: Reader task died, reconnecting...", self_rank, target);
+                                    connection_active = false;
+                                }
+                            }
+                        }
+
                         Some(cmd) = to_send_rx.recv() => {
                             let msg_id = match cmd.clone() {
                                 RegisterCommand::System(sys_cmd) => {
@@ -207,19 +222,6 @@ impl MyRegisterClient {
                                 cmd, 
                                 last_sent: Instant::now(), 
                             });
-                        }
-    
-                        res = ack_rx.recv() => {
-                            match res {
-                                Some(res) => {
-                                    let (ack, _valid_hmac) = res;
-                                    pending_messages.remove(&ack.msg_ident);
-                                }
-                                None => {
-                                    info!("[{} with {}]: Reader task died, reconnecting...", self_rank, target);
-                                    connection_active = false;
-                                }
-                            }
                         }
     
                         _ = retry_ticker.tick() => {
@@ -277,8 +279,6 @@ impl RegisterClient for MyRegisterClient {
     }
 
     async fn broadcast(&self, msg: Broadcast) {
-        // TODO skip TCP when sending to self
-        // and maybe there just is a bettter way to send one/many messages
         for target in 1..=self.state.tcp_locations.len() as u8 {
             // await the creation of the task so that it actually happens,
             // (the finishing of the task is not awaited)

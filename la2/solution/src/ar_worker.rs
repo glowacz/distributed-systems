@@ -18,7 +18,7 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
         trace!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
         
         let mut processing_client = false;
-        let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(1000);
+        let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(10);
         let mut client_wait_queue = VecDeque::new();
 
         // if there is sth on client queue, start by moving it to main queue

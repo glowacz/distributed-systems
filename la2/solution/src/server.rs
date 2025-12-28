@@ -123,7 +123,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
 
                             let (tx, _client_tx, rx_opt, client_rx_opt) = get_or_create_channels(&state, sector_idx).await;
 
-                            tx.send((RegisterCommand::System(cmd), 0)).await.unwrap();
+                            let _ = tx.send((RegisterCommand::System(cmd), 0)).await;
                             
                             if let (Some(rx), Some(client_rx)) = (rx_opt, client_rx_opt) {
                                 start_ar_worker(client.clone(), sectors_manager.clone(), sector_idx, rx, tx, client_rx).await;

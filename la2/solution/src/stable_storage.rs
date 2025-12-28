@@ -1,12 +1,8 @@
-use std::{io::ErrorKind, path::PathBuf};
+use std::{path::PathBuf};
 
 use base64::{Engine, engine::general_purpose};
 use sha2::{Digest, Sha256};
 use tokio::{fs::{File, create_dir_all, read_dir, remove_file}, io::{AsyncReadExt, AsyncWriteExt}};
-// You can add here other imports from std or crates listed in Cargo.toml.
-
-// You can add any private types, structs, consts, functions, methods, etc., you need.
-// As always, you should not modify the public interfaces.
 
 const CHECKSUM_LEN: usize = 44;
 const MAX_KEY_LEN: usize = 255;
@@ -187,8 +183,7 @@ impl StableStorage for MyStableStorage {
 
         let mut file = match File::open(path).await {
             Ok(file) => file,
-            Err(e) if e.kind() == ErrorKind::NotFound => return None,
-            Err(_) => panic!(),
+            Err(_) => return None,
         };
         
         file.read_to_end(&mut bytes).await.unwrap();

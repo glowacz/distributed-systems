@@ -2,11 +2,13 @@ use crate::sectors_manager_public::SectorsManager;
 use crate::{SectorIdx, SectorVec};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 use crate::stable_storage::{MyStableStorage, StableStorage, build_my_stable_storage};
 use log::{debug};
 use serde_big_array::Array;
 use tokio::fs::read_dir;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{RwLock};
+use tokio::time::sleep;
 pub struct MySectorsManager {
     path: PathBuf,
     storage: RwLock<MyStableStorage>,
@@ -67,7 +69,12 @@ impl SectorsManager for MySectorsManager {
             },
             Some((name, _ts, _wr)) => name,
         };
-        let data_vec = self.storage.read().await.get(file_name.as_str()).await.unwrap();
+        let mut res = self.storage.read().await.get(file_name.as_str()).await;
+        while let None = res {
+            sleep(Duration::from_millis(100)).await;
+            res = self.storage.read().await.get(file_name.as_str()).await;
+        }
+        let data_vec = res.unwrap();
         let data_array = data_vec.try_into().unwrap();
         let wrapped_array = Array(data_array);
         SectorVec(Box::new(wrapped_array))
@@ -86,7 +93,6 @@ impl SectorsManager for MySectorsManager {
         }
     }
 
-    // TODO: delete (remove) old file name (with old ts, wr)
     async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
         let old_file_name_opt = self.idx_map.read().await.get(&idx).cloned();
 
@@ -97,12 +103,21 @@ impl SectorsManager for MySectorsManager {
         let data = sector.0.0.as_slice().to_vec();
         
         // println!("Writing sector {idx} under file name {file_name}...");
-        let _ = self.storage.read().await.put(&file_name, &data).await.unwrap();
+        let mut res = self.storage.read().await.put(&file_name, &data).await;
+        while let Err(_e) = res {
+            sleep(Duration::from_millis(100)).await;
+            res = self.storage.read().await.put(&file_name, &data).await;
+        }
+
         self.idx_map.write().await.insert(idx, (file_name, sector.1, sector.2));
         // println!("Write sector {idx}, new file written");
 
         if let Some((old_file_name, _ts, _wr)) = old_file_name_opt {
-            self.storage.write().await.remove(&old_file_name).await;
+            let mut res =  self.storage.write().await.remove(&old_file_name).await;
+            while false == res {
+                sleep(Duration::from_millis(100)).await;
+                res = self.storage.write().await.remove(&old_file_name).await;
+            }
             // println!("Write sector {idx}, old file removed");
         }
     }
