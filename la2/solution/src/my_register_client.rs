@@ -27,8 +27,6 @@ pub struct MyRegisterClient {
     pub state: Arc<SharedState>
 }
 
-// TODO: change the level of every log to trace! (maybe except new connection)
-
 impl MyRegisterClient {
     pub async fn new(conf: Configuration) -> Self {
         let n_nodes = conf.public.tcp_locations.len();
@@ -92,14 +90,14 @@ impl MyRegisterClient {
 
         tokio::spawn(async move {    
             while let Some(response) = to_send_rx.recv().await {
-                info!("\n[MyRegisterClient {}] Before replying to client {client_id}\n", self_rank);
+                trace!("\n[MyRegisterClient {}] Before replying to client {client_id}\n", self_rank);
 
                 let mut tcp_writer = wr.lock().await;
                 let res = serialize_client_response(&response, &mut *tcp_writer, &hmac_client_key).await;
                 
                 let flush_res = tcp_writer.flush().await;
                 
-                info!("[MyRegisterClient {}] Replied to client {client_id} with result {:?} and flush result {:?}", self_rank, res, flush_res);
+                trace!("[MyRegisterClient {}] Replied to client {client_id} with result {:?} and flush result {:?}", self_rank, res, flush_res);
             }
         });
     }

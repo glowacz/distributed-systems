@@ -1,7 +1,7 @@
 use std::collections::{VecDeque};
 use std::{sync::Arc};
 
-use log::{info, trace, warn,};
+use log::{trace, warn,};
 use tokio::select;
 
 use crate::my_register_client::MyRegisterClient;
@@ -57,7 +57,7 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     trace!("[AR worker {}]: got {} for sector {}", client.self_rank, recv_cmd.clone(), sector_idx);
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
-                            info!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
+                            trace!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
                             processing_client = true;                  
                             let tx_client_done_clone = tx_client_done.clone();
         
@@ -81,7 +81,7 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     }
                 }
                 opt = rx_client_done.recv() => {
-                    info!("[AR worker {}, {}]: finished processing whole client request", client.self_rank, sector_idx);
+                    trace!("[AR worker {}, {}]: finished processing whole client request", client.self_rank, sector_idx);
                     processing_client = false;
                     if let Some((response, client_id)) = opt {
                         let _ = client.reply_to_client(response, client_id).await;

@@ -2,7 +2,7 @@ use std::collections::{HashMap};
 use std::io::ErrorKind;
 use std::{path::PathBuf, sync::Arc};
 
-use log::{error, info, trace,};
+use log::{debug, error, trace};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener};
 use tokio::sync::mpsc::{Sender, channel};
@@ -24,8 +24,6 @@ pub struct SharedState {
     pub client_cmd_senders: Arc<RwLock<HashMap<u64, Sender<(RegisterCommand, u64)>>>>,
     pub sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>
 }
-
-// TODO: change the level of every log to trace! (maybe except new connection)
 
 pub async fn get_or_create_channels(
     state: &Arc<SharedState>,
@@ -102,7 +100,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     match recv_cmd {
                         RegisterCommand::System(cmd) => {
                             if !hmac_valid {
-                                error!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
+                                debug!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
                                     self_addr.0, self_addr.1, cmd);
                                 // we don't want to read from this guy anymore
                                 // he tried to impersonate a system node, so he won't even get
@@ -142,7 +140,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             }
 
                             if !hmac_valid {
-                                error!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
+                                debug!("[{}:{}]: Received CLIENT command with invalid HMAC signature, ignoring. The command: {:?}",
                                 self_addr.0, self_addr.1, cmd);
                                 let reply_cmd =
                                     ClientCommandResponse { 
@@ -158,7 +156,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             }
 
                             if cmd.header.sector_idx >= client._n_sectors {
-                                error!("[{}:{}]: Received CLIENT command with sector_idx ({}) exceeding n_sectors ({})",
+                                debug!("[{}:{}]: Received CLIENT command with sector_idx ({}) exceeding n_sectors ({})",
                                 self_addr.0, self_addr.1, cmd.header.sector_idx, client._n_sectors);
                                 let reply_cmd =
                                     ClientCommandResponse { 
@@ -174,7 +172,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                 continue;
                             }
 
-                            info!("[{}:{}]: Received valid CLIENT command from ({}, {})\nCommand:{}",
+                            debug!("[{}:{}]: Received valid CLIENT command from ({}, {})\nCommand:{}",
                                 self_addr.0, self_addr.1, client_ip, client_port, cmd);
                             let sector_idx = cmd.header.sector_idx;
 
@@ -199,7 +197,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                 Err(e) => {                    
                     match e {
                         DecodingError::IoError(io_err) if io_err.kind() == ErrorKind::UnexpectedEof => {
-                            info!("[{}:{} with {client_id}]: Client {}:{} disconnected (EOF).", 
+                            debug!("[{}:{} with {client_id}]: Client {}:{} disconnected (EOF).", 
                                 self_addr.0, self_addr.1, client_ip, client_port);
                         },
                         _ => {
@@ -218,7 +216,7 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
 pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String, u16), _storage_dir: PathBuf) {
     let sectors_manager = client.state.sectors_manager.clone();
 
-    info!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
+    debug!("Starting TCP server at {}:{}", self_addr.0, self_addr.1);
 
     tokio::spawn( async move { // TCP server task (receive messages)
         let socket = TcpListener::bind(
@@ -231,7 +229,7 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
         loop {
             client_id += 1;
             let (socket, client_addr) = socket.accept().await.unwrap();
-            info!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
+            debug!("[{}:{}]: Accepted connection from {}", self_addr.0, self_addr.1, client_addr);
             
             let (rd, wr) = socket.into_split();
             let protected_writer = Arc::new(Mutex::new(wr));
