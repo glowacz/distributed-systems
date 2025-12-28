@@ -74,13 +74,13 @@ impl MyStableStorage {
                     let mut file = File::create(file_path).await.unwrap();
                     file.write_all(value).await.unwrap();
                     file.sync_data().await.unwrap();
-                    root_dir.sync_data().await.unwrap();
+                    root_dir.sync_all().await.unwrap();
                 }
                 // else can't do anything, bad tmp file
             }
 
             remove_file(&tmp_file_path).await.unwrap();
-            tmp_dir.sync_data().await.unwrap();
+            tmp_dir.sync_all().await.unwrap();
         }
     }
 
@@ -99,7 +99,7 @@ impl MyStableStorage {
         }
         let dir = dir_res.unwrap();
 
-        if let Err(e) = dir.sync_data().await {
+        if let Err(e) = dir.sync_all().await {
             return Err(e.to_string());
         };
 
@@ -201,6 +201,10 @@ impl StableStorage for MyStableStorage {
         }
         else {
             return false;
+        }
+
+        if let Err(ref _e) = self.sync_dir().await {
+           return false;
         }
 
         return true;
