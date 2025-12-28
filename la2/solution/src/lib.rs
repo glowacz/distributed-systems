@@ -117,7 +117,6 @@ pub mod transfer_public {
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::io::AsyncWriteExt;
     use tokio::io::AsyncReadExt; // Import the trait to bring `read_exact` into scope
-    // use hmac::digest::KeyInit;
     type HmacSha256 = Hmac<Sha256>;
     #[derive(Debug)]
     pub enum EncodingError {
@@ -201,8 +200,6 @@ pub mod transfer_public {
         mac.update(payload);
         let mut hmac_valid = mac.verify_slice(received_hmac).is_ok();
 
-        // even if the message isn't signed with a valid hmac using system key, 
-        // it still a valid message (with valid hmac) from client
         if !hmac_valid {
             let mut mac = HmacSha256::new_from_slice(hmac_client_key)
             .map_err(|_| DecodingError::IoError(Error::new(ErrorKind::InvalidInput, "HMAC key invalid")))?;

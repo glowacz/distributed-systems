@@ -27,7 +27,6 @@ pub struct SharedState {
 
 // TODO: change the level of every log to trace! (maybe except new connection)
 
-// Helper to safely get or create channels atomically
 pub async fn get_or_create_channels(
     state: &Arc<SharedState>,
     sector_idx: u64
@@ -41,6 +40,7 @@ pub async fn get_or_create_channels(
         let main_map = state.main_cmd_senders.read().await;
         let client_map = state.client_cmd_senders.read().await;
         if let (Some(main_tx), Some(client_tx)) = (main_map.get(&sector_idx), client_map.get(&sector_idx)) {
+            trace!("Retrieved queues from map (there already was a task for this sector: {})", sector_idx);
             return (main_tx.clone(), client_tx.clone(), None, None);
         }
     }
@@ -50,6 +50,8 @@ pub async fn get_or_create_channels(
 
     let (main_tx, main_rx) = match main_map.get(&sector_idx) {
         Some(tx) => {
+            trace!("Retrieved main queue from map (there already was a main queue to task for this sector: {})", sector_idx);
+
             (tx.clone(), None)
         }
         None => {
@@ -61,6 +63,8 @@ pub async fn get_or_create_channels(
 
     let (client_tx, client_rx) = match client_map.get(&sector_idx) {
         Some(tx) => {
+            trace!("Retrieved CLIENT queue from map (there already was a CLIENT queue to task for this sector: {})", sector_idx);
+
             (tx.clone(), None)
         }
         None => {
@@ -75,7 +79,6 @@ pub async fn get_or_create_channels(
 
 pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc<dyn sectors_manager_public::SectorsManager>, 
     wr: Arc<Mutex<OwnedWriteHalf>>, // the wr is either for responding to the client or sending internal ACK
-    // mut wr: OwnedWriteHalf, // the wr is either for responding to the client or sending internal ACK
     // writing VAL or ACK from alogrithm is done via the permanent task in MyRegisterClient
     mut rd: OwnedReadHalf,
     client_ip: String, client_port: u16,
@@ -185,7 +188,6 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             // warn!("[{}:{}]: Got from get_or_create_channels: {:?} {:?} {:?} {:?}\n", self_addr.0, self_addr.1, 
                             // tx, client_tx, rx_opt, client_rx_opt);
 
-                            // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
                                 if let Some(client_rx) = client_rx_opt{
                                     start_ar_worker(client.clone(), sectors_manager.clone(), sector_idx, rx, tx, client_rx).await;
@@ -225,7 +227,6 @@ pub async fn start_tcp_server(client: Arc<MyRegisterClient>, self_addr: (String,
         let mut client_id: u64 = 0;
 
         trace!("Bound to socket {}:{}", self_addr.0, self_addr.1);
-        
 
         loop {
             client_id += 1;

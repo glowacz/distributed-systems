@@ -34,8 +34,6 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
             client.self_rank,
             sector_idx,
             client.clone(),
-            // client,
-            // sectors_manager.clone(),
             sectors_manager,
             n
         ).await;

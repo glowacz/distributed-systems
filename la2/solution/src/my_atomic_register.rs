@@ -10,11 +10,8 @@ struct AtomicRegisterData {
     self_rank: u8,
     wr: u8,
     ts: u64,
-    val: SectorVec, // keeping this in memory should allow to sometimes avoid the disk (caching)
-    // hopefully managing consistency will not be too hard
-    // since we will do recovery after a crash
-    // and from this point on 
-    readlist: HashMap<u8, (u64, u8, SectorVec)>, // (ts, ws, val)
+    val: SectorVec,
+    readlist: HashMap<u8, (u64, u8, SectorVec)>, // (ts, wr, val)
     acklist: HashMap<u8, bool>,
     reading: bool,
     writing: bool,
@@ -51,7 +48,6 @@ impl MyAtomicRegister {
         // so we can just omit the disk in this case
 
         Self {
-            // process_id: self_ident,
             sector_idx,
             client,
             sectors_manager,
@@ -83,11 +79,10 @@ impl MyAtomicRegister {
             if ts > max_ts || (ts == max_ts && wr > max_wr) {
                 max_ts = ts;
                 max_wr = wr;
-                // val_opt = Some(val.clone());
                 readval = val.clone();
             }
         }
-        // (max_ts, max_wr, val_opt.unwrap())
+
         (max_ts, max_wr, readval)
     }
 
@@ -118,7 +113,6 @@ impl AtomicRegister for MyAtomicRegister {
         self.data.acklist.clear();
 
         self.callbacks.insert(self.data.op_id, success_callback);
-        // or maybe there should be just one callback possible at a time?
         self.request_ids.insert(self.data.op_id, cmd.header.request_identifier);
 
         match cmd.content {
@@ -178,7 +172,6 @@ impl AtomicRegister for MyAtomicRegister {
                 sector_data 
             } => {
                 trace!("[AR CLASS {}]: got Value from {}", self.data.self_rank, cmd.header.process_identifier);
-                // if cmd.header.msg_ident != self.data.op_id || cmd.header.process_identifier == self.data.self_rank {
                 if cmd.header.msg_ident != self.data.op_id {
                     return;
                 }
@@ -187,8 +180,6 @@ impl AtomicRegister for MyAtomicRegister {
                     cmd.header.process_identifier, timestamp, write_rank);
 
                 if self.data.readlist.len() as u8 > self.n / 2 && (self.data.reading || self.data.writing) {
-                     // >= because (ts, wr, val) from self is not in readlist
-                    // self.data.readlist.insert(self.data.self_rank, (self.data.ts, self.data.wr, self.data.val.clone()));
                     let (maxts, rr, readval) = self.highest();
                     self.data.readval = readval.clone();
                     self.data.readlist.clear();
@@ -216,9 +207,6 @@ impl AtomicRegister for MyAtomicRegister {
                     } else {
                         let (ts, wr, val) = (maxts + 1, self.data.self_rank, self.data.writeval.clone());
                         self.store(ts, wr, &val).await;
-                        // self.data.ts = ts;
-                        // self.data.wr = wr;
-                        // self.data.val = val;
 
                         let command = SystemRegisterCommand {
                             header,
@@ -264,7 +252,6 @@ impl AtomicRegister for MyAtomicRegister {
             SystemRegisterCommandContent::Ack => {
                 trace!("[AR CLASS {}]: got Ack from {}", self.data.self_rank, cmd.header.process_identifier);
                 if cmd.header.msg_ident != self.data.op_id 
-                    // || cmd.header.process_identifier == self.data.self_rank
                     || !self.data.write_phase {
                         return;
                 }
@@ -275,9 +262,6 @@ impl AtomicRegister for MyAtomicRegister {
                     self.data.write_phase = false;
 
                     if self.data.reading {
-                        // let req_id = self.request_ids.get(cmd.header.msg_ident.clone().as_ref()).unwrap_or(&0);
-                        // println!("[READ] operation {req_id} completed (on {})", self.data.self_rank);
-
                         self.data.reading = false;
                         let response = ClientCommandResponse {
                             status: crate::StatusCode::Ok,
@@ -290,9 +274,6 @@ impl AtomicRegister for MyAtomicRegister {
                         callback(response).await;
                     }
                     else {
-                        // let req_id = self.request_ids.get(cmd.header.msg_ident.clone().as_ref()).unwrap_or(&0);
-                        // println!("[WRITE] operation sector {}, id {req_id} completed (on {})", self.sector_idx, self.data.self_rank);
-
                         self.data.writing = false;
                         let response = ClientCommandResponse {
                             status: crate::StatusCode::Ok,

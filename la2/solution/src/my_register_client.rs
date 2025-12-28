@@ -39,23 +39,11 @@ impl MyRegisterClient {
             .map(|_| Mutex::new(false))
             .collect();
 
-        // let to_send: Arc<Vec<RwLock<VecDeque<RegisterCommand>>>> = Arc::new(
-        //     (0..n_nodes)
-        //     .map(|_| RwLock::new(VecDeque::new()))
-        //     .collect()
-        // );
-
         let to_send: Arc<Vec<Mutex<Option<Sender<RegisterCommand>>>>> = Arc::new(
             (0..n_nodes)
             .map(|_| Mutex::new(None))
             .collect()
         );
-
-        // let to_send_client: Arc<Vec<Mutex<Option<Sender<ClientCommandResponse>>>>> = Arc::new(
-        //     (0..n_nodes)
-        //     .map(|_| Mutex::new(None))
-        //     .collect()
-        // );
 
         let to_send_client = Arc::new(RwLock::new(HashMap::new()));
 
@@ -93,7 +81,6 @@ impl MyRegisterClient {
 
     pub async fn reply_to_client_task(&self, 
         client_id: u64,
-        // wr: Arc<Mutex<OwnedWriteHalf>>, 
         mut to_send_rx: Receiver<ClientCommandResponse>
     ) {    
         let hmac_client_key = self.state.hmac_client_key;
@@ -114,7 +101,6 @@ impl MyRegisterClient {
                 
                 info!("[MyRegisterClient {}] Replied to client {client_id} with result {:?} and flush result {:?}", self_rank, res, flush_res);
             }
-            // tcp_writer is dropped here nicely when the sender is dropped
         });
     }
 
