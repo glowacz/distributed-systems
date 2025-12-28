@@ -100,7 +100,7 @@ impl MyRegisterClient {
 
         let self_rank = self.self_rank;
 
-        info!("\n\n[{self_rank}]: started task for replying to client {client_id}\n==========================================");
+        trace!("[{self_rank}]: started task for replying to client {client_id}\n==========================================");
 
         tokio::spawn(async move {    
             while let Some(response) = to_send_rx.recv().await {
@@ -111,7 +111,7 @@ impl MyRegisterClient {
                 
                 let flush_res = tcp_writer.flush().await;
                 
-                info!("\n\n[MyRegisterClient {}] After replying to client {client_id} with result {:?} and flush result {:?}\n\n", self_rank, res, flush_res);
+                info!("[MyRegisterClient {}] Replied to client {client_id} with result {:?} and flush result {:?}", self_rank, res, flush_res);
             }
             // tcp_writer is dropped here nicely when the sender is dropped
         });
@@ -131,7 +131,7 @@ impl MyRegisterClient {
             while let Some(cmd) = to_send_rx.recv().await {
                 loop {
                     // stubborn connect, without connection sending and waiting for ACKs
-                    // don't have sense
+                    // don't make sense
                     if tcp_stream.is_none() {
                         info!("[{}]: connecting to node {} ({}:{})...", self_rank, target, ip, port);
                         loop {
@@ -163,18 +163,16 @@ impl MyRegisterClient {
                     }
                     else {
                         trace!("[{}]: sent message to node {} ({}:{})...", self_rank, target, ip, port);
+                        // break; // for turning off ACKs
                     }
 
-                    // info!("[{}]: going into SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
+                    info!("[{}]: going into SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
 
                     select! {
                         biased;
 
                         res = deserialize_internal_ack(rd_ack, &hmac_system_key, &hmac_client_key) => {
                             if let Err(_e) = res {
-                                // the error probably was that we don't have a connection,
-                                // or maybe the HMAC was wrong
-                                // anyway, let's try to connect again
                                 warn!("[{}]: error getting ACK from node {} ({}{})", self_rank, target, ip.clone(), port);
                                 tcp_stream = None;
                             }
@@ -187,7 +185,7 @@ impl MyRegisterClient {
                             info!("[{}]: timeout waiting for ACK from node {}({}{}), resending...", self_rank, target, ip.clone(), port);
                         }
                     }
-                    // info!("[{}]: after SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
+                    info!("[{}]: after SELECT (with node {} ({}:{}))", self_rank, target, ip, port);
                 }
             }
         });
