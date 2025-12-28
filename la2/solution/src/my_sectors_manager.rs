@@ -9,7 +9,7 @@ use tokio::fs::read_dir;
 use tokio::sync::{Mutex, RwLock};
 pub struct MySectorsManager {
     path: PathBuf,
-    storage: Mutex<MyStableStorage>,
+    storage: RwLock<MyStableStorage>,
     idx_map: RwLock<HashMap<SectorIdx, (String, u64, u8)>>,
 }
 
@@ -17,7 +17,7 @@ impl MySectorsManager {
     pub async fn new(path: PathBuf) -> Self {
         Self { 
             path: path.clone(),
-            storage: Mutex::new(build_my_stable_storage(path.clone()).await),
+            storage: RwLock::new(build_my_stable_storage(path.clone()).await),
             idx_map: RwLock::new(HashMap::new())
         }
     }
@@ -42,7 +42,7 @@ impl MySectorsManager {
                         if let Some(idx) = idx_opt {
                             if let Some((old_name, old_ts, old_wr)) = self.idx_map.read().await.get(&idx) {
                                 if (ts, wr) > (*old_ts, *old_wr) {
-                                    self.storage.lock().await.remove(&old_name).await;
+                                    self.storage.write().await.remove(&old_name).await;
                                     self.idx_map.write().await.insert(idx, (name_str.to_string(), ts, wr));
                                 }
                             }
@@ -67,7 +67,7 @@ impl SectorsManager for MySectorsManager {
             },
             Some((name, _ts, _wr)) => name,
         };
-        let data_vec = self.storage.lock().await.get(file_name.as_str()).await.unwrap();
+        let data_vec = self.storage.read().await.get(file_name.as_str()).await.unwrap();
         let data_array = data_vec.try_into().unwrap();
         let wrapped_array = Array(data_array);
         SectorVec(Box::new(wrapped_array))
@@ -97,12 +97,12 @@ impl SectorsManager for MySectorsManager {
         let data = sector.0.0.as_slice().to_vec();
         
         // println!("Writing sector {idx} under file name {file_name}...");
-        let _ = self.storage.lock().await.put(&file_name, &data).await.unwrap();
+        let _ = self.storage.read().await.put(&file_name, &data).await.unwrap();
         self.idx_map.write().await.insert(idx, (file_name, sector.1, sector.2));
         // println!("Write sector {idx}, new file written");
 
         if let Some((old_file_name, _ts, _wr)) = old_file_name_opt {
-            self.storage.lock().await.remove(&old_file_name).await;
+            self.storage.write().await.remove(&old_file_name).await;
             // println!("Write sector {idx}, old file removed");
         }
     }
