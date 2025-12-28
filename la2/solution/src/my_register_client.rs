@@ -12,7 +12,7 @@ use tokio::{select};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::server::{SharedState};
+use crate::server::{SharedState, get_or_create_channels};
 use crate::{Ack, ClientCommandResponse, PendingMessage, build_sectors_manager, deserialize_internal_ack, serialize_client_response};
 use crate::{Broadcast, Configuration, RegisterClient, RegisterCommand, SystemRegisterCommand, register_client_public, serialize_register_command};
 
@@ -244,20 +244,28 @@ impl MyRegisterClient {
     }
 
     async fn send_msg(&self, cmd: Arc<SystemRegisterCommand>, target: u8) {
+        let sector_idx = cmd.header.sector_idx;
         let cmd = RegisterCommand::System((*cmd).clone());
 
-        let mut to_send_mut = self.to_send[(target - 1) as usize].lock().await;
-        let to_send_tx = match &*to_send_mut {
-            Some(tx) => tx.clone(),
-            None => {
-                let (tx, rx) = channel::<RegisterCommand>(1000);
-                *to_send_mut = Some(tx.clone());
-                self.sender_task(target, rx).await;
+        if target == self.self_rank {
+            let state = self.state.clone();
+            let (tx, _client_tx, _, _) = get_or_create_channels(&state, sector_idx).await;
+            tx.send((cmd, 0)).await.unwrap();
+        }
+        else {
+            let mut to_send_mut = self.to_send[(target - 1) as usize].lock().await;
+            let to_send_tx = match &*to_send_mut {
+                Some(tx) => tx.clone(),
+                None => {
+                    let (tx, rx) = channel::<RegisterCommand>(1000);
+                    *to_send_mut = Some(tx.clone());
+                    self.sender_task(target, rx).await;
 
-                tx
-            }
-        };
-        let _ = to_send_tx.send(cmd).await;
+                    tx
+                }
+            };
+            let _ = to_send_tx.send(cmd).await;
+        }
     }
 }
 

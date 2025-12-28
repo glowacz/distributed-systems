@@ -27,7 +27,7 @@ pub struct SharedState {
 // TODO: change the level of every log to trace! (maybe except new connection)
 
 // Helper to safely get or create channels atomically
-async fn get_or_create_channels(
+pub async fn get_or_create_channels(
     state: &Arc<SharedState>,
     sector_idx: u64
 ) -> (
@@ -162,8 +162,10 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             client_tx.send((
                                 RegisterCommand::Client(cmd), client_id 
                             )).await.unwrap();
-                            trace!("[{}:{}]: Sent command onto the client queue",
-                            self_addr.0, self_addr.1);
+                            trace!("[{}:{}]: Sent command onto the client queue", self_addr.0, self_addr.1);
+
+                            // warn!("[{}:{}]: Got from get_or_create_channels: {:?} {:?} {:?} {:?}\n", self_addr.0, self_addr.1, 
+                            // tx, client_tx, rx_opt, client_rx_opt);
 
                             // tx.send(RegisterCommand::Client(cmd)).await.unwrap();
                             if let Some(rx) = rx_opt {
