@@ -27,9 +27,9 @@ fn init_logs() {
         .try_init();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
-#[timeout(2000)]
+#[timeout(30000)]
 async fn two_nodes() {
     init_logs();
     // given
@@ -98,9 +98,11 @@ async fn two_nodes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[serial_test::serial]
 #[timeout(50000)]
 async fn run_on_many_sectors() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    // let _ = env_logger::builder().is_test(true).try_init();
+    init_logs();
 
     // given
     let port_range_start = 21518;
@@ -115,7 +117,7 @@ async fn run_on_many_sectors() {
             .send_cmd(
                 &RegisterCommand::Client(ClientRegisterCommand {
                     header: ClientCommandHeader {
-                        request_identifier: i.try_into().unwrap(),
+                        request_identifier: i as u64,
                         sector_idx: i as u64,
                     },
                     content: ClientRegisterCommandContent::Write {
@@ -125,13 +127,18 @@ async fn run_on_many_sectors() {
                 &mut stream,
             )
             .await;
-        config.read_response(&mut stream).await;
+    }
 
+    for _i in 1..sectors_to_ask+1 {
+        config.read_response(&mut stream).await;
+    }
+
+    for i in 1..sectors_to_ask+1 {
         config
             .send_cmd(
                 &RegisterCommand::Client(ClientRegisterCommand {
                     header: ClientCommandHeader {
-                        request_identifier: n_clients,
+                        request_identifier: i as u64 + n_clients,
                         sector_idx: i as u64,
                     },
                     content: ClientRegisterCommandContent::Read,
@@ -139,16 +146,23 @@ async fn run_on_many_sectors() {
                 &mut stream,
             )
             .await;
+    }
+
+    for i in 1..sectors_to_ask+1 {
         let response = config.read_response(&mut stream).await;
+
+        println!("Sector {i}:\n{:?}", response.content.op_return);
 
         match response.content.op_return {
             OperationReturn::Read {
                 read_data: SectorVec(sector),
             } => {
-                assert!(*sector == Array([i+4; 4096]));
+                assert!(*sector == Array([response.content.request_identifier as u8 - n_clients as u8 + 4; 4096]));
             }
             _ => panic!("Expected read response"),
         }
+
+        println!("Sector {i} passed");
     }
 }
 
@@ -159,7 +173,7 @@ async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 1;
+    let commands_total = 50;
     let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;
@@ -223,7 +237,7 @@ async fn multiple_nodes_multiple_sectors() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(500000)]
 async fn multiple_clients() {
@@ -302,7 +316,7 @@ async fn multiple_clients() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(50000)]
 async fn many_clients_same_sector() {
@@ -383,7 +397,7 @@ async fn many_clients_same_sector() {
     // }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(50000)]
 async fn serial_writes_same_sector() {

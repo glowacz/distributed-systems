@@ -19,7 +19,7 @@ use std::io::Write;
 fn init_logs() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info)
         // .format(|buf, record| { // NO Timestamps
         //     writeln!(buf, "{}", record.args())
         // })
@@ -101,6 +101,7 @@ async fn single_process_system_completes_operations() {
 #[serial_test::serial]
 #[timeout(30000)]
 async fn concurrent_operations_on_the_same_sector() {
+    init_logs();
     // given
     let port_range_start = 22718;
     let n_clients = 16;
