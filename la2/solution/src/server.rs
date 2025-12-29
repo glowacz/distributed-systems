@@ -152,7 +152,8 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                                         }
                                     };
                                 client.reply_to_client(reply_cmd, client_id).await;
-                                return;
+                                
+                                continue;
                             }
 
                             if cmd.header.sector_idx >= client._n_sectors {

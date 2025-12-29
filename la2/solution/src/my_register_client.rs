@@ -209,7 +209,7 @@ impl MyRegisterClient {
                         }
     
                         _ = retry_ticker.tick() => {
-                            debug!("[{} with {}]: received tick for retrying sending", self_rank, target);
+                            // debug!("[{} with {}]: received tick for retrying sending", self_rank, target);
                             let now = Instant::now();
                             for (id, pending) in pending_messages.iter_mut() {
                                 if now.duration_since(pending.last_sent) > retry_period {
