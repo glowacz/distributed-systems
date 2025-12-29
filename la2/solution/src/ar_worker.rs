@@ -18,15 +18,16 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
         trace!("[AR worker {}]: Starting for sector {}", client.self_rank, sector_idx);
         
         let mut processing_client = false;
+        let mut client_in_transit = false; 
+        
         let (tx_client_done, mut rx_client_done) = tokio::sync::mpsc::channel(10);
         let mut client_wait_queue = VecDeque::new();
 
-        // if there is sth on client queue, start by moving it to main queue
         let res = client_rx.try_recv();
         if let Ok((recv_cmd, writer_opt)) = res {
-            trace!("[{}]: Received command on client queue, piping to main",
-            client.self_rank);
+            trace!("[{}]: Received command on client queue, piping to main", client.self_rank);
             let _ = tx.send((recv_cmd, writer_opt)).await;
+            client_in_transit = true;
         }
 
         let n = client.state.tcp_locations.len() as u8;
@@ -40,16 +41,14 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
 
         trace!("[AR worker {}]: Starting LOOP for sector {}", client.self_rank, sector_idx);
 
-        // while let Some((recv_cmd, writer_opt)) = rx.recv().await {
         loop {
             trace!("[AR worker {}, {}]: loop", client.self_rank, sector_idx);
-            // check if we're processing client request and if there is sth on client queue
-            // if NO and YES, move the request from client to main queue
-
-            if !processing_client && !client_wait_queue.is_empty() {
+            
+            if !processing_client && !client_in_transit && !client_wait_queue.is_empty() {
                 trace!("[AR worker {}, {}]: getting client request from client wait queue to main queue", client.self_rank, sector_idx);
                 let (recv_cmd, writer_opt) = client_wait_queue.pop_front().unwrap();
                 let _ = tx.send((recv_cmd, writer_opt)).await;
+                client_in_transit = true;
             }
 
             select! {
@@ -58,6 +57,15 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                     match recv_cmd {
                         RegisterCommand::Client(cmd) => {
                             trace!("[AR worker {}, {}]: starting to process client request", client.self_rank, sector_idx);
+                            
+                            client_in_transit = false;
+                            
+                            if processing_client {
+                                warn!("[AR worker]: Race condition caught! Queueing command instead of overwriting.");
+                                client_wait_queue.push_back((RegisterCommand::Client(cmd), client_id));
+                                continue;
+                            }
+
                             processing_client = true;                  
                             let tx_client_done_clone = tx_client_done.clone();
         
@@ -93,15 +101,15 @@ pub async fn start_ar_worker(client: Arc<MyRegisterClient>, sectors_manager: Arc
                 }
                 Some((recv_cmd, writer_opt)) = client_rx.recv() => {
                     trace!("[AR worker {}, {}]: received CLIENT request on client queue", client.self_rank, sector_idx);
-                    if !processing_client {
+                    
+                    if !processing_client && !client_in_transit {
                         let _ = tx.send((recv_cmd, writer_opt)).await;
+                        client_in_transit = true;
                         trace!("[AR worker {}, {}]: putting CLIENT request on the MAIN queue", client.self_rank, sector_idx);
-
                     }
                     else {
                         client_wait_queue.push_back((recv_cmd, writer_opt));
                         trace!("[AR worker {}, {}]: putting CLIENT request on the WAIT queue", client.self_rank, sector_idx);
-
                     }
                 }
             }
