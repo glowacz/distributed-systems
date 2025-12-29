@@ -28,24 +28,11 @@ pub struct TestProcessesConfig {
     tcp_locations: Vec<(String, u16)>,
 }
 
-async fn get_free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 impl TestProcessesConfig {
     pub const N_SECTORS: u64 = 65536;
 
     #[allow(clippy::missing_panics_doc, clippy::must_use_candidate)]
     pub async fn new(processes_count: usize, _port_range_start: u16) -> Self {
-        // let mut ports = Vec::new();
-        // for _i in 0..processes_count {
-        //     ports.push(get_free_port().await);
-        // }
         let tcp_locations = (0..processes_count)
             .map(|idx| {
                 (
