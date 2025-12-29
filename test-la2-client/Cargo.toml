@@ -1,0 +1,16 @@
+[package]
+name = "test-la2-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+rand = "0.8" # or 0.9 depending on your rng() syntax
+log = "0.4"
+env_logger = "0.10" # Optional, but good for seeing 'trace' logs
+hmac = "0.12"
+sha2 = "0.10"
+serde-big-array = "0.5"
+tempfile = "3.3"
+# Your custom assignment solution crate
+assignment-2-solution = { path = "../la2/solution" }
