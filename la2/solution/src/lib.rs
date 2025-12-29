@@ -116,7 +116,7 @@ pub mod transfer_public {
     use std::io::{Error, ErrorKind};
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::io::AsyncWriteExt;
-    use tokio::io::AsyncReadExt; // Import the trait to bring `read_exact` into scope
+    use tokio::io::AsyncReadExt;
     type HmacSha256 = Hmac<Sha256>;
     #[derive(Debug)]
     pub enum EncodingError {

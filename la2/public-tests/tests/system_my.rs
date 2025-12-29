@@ -173,7 +173,7 @@ async fn multiple_nodes_multiple_sectors() {
     init_logs();
     // given
     let port_range_start = 21625;
-    let commands_total = 50;
+    let commands_total = 500;
     let config = TestProcessesConfig::new(4, port_range_start).await;
     config.start().await;
     let mut stream = config.connect(0).await;

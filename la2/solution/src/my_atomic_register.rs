@@ -257,7 +257,7 @@ impl AtomicRegister for MyAtomicRegister {
                 }
                 self.data.acklist.insert(cmd.header.process_identifier, true);
 
-                if self.data.acklist.len() as u8 > self.n / 2 { // >= because self ack is not in acklist
+                if self.data.acklist.len() as u8 > self.n / 2 {
                     self.data.acklist.clear();
                     self.data.write_phase = false;
 

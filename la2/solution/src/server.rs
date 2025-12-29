@@ -102,11 +102,9 @@ pub async fn tcp_reader_task(client: Arc<MyRegisterClient>, sectors_manager: Arc
                             if !hmac_valid {
                                 debug!("[{}:{}]: Received SYSTEM command with invalid HMAC signature, DROPPING CONNECTION. The command: {:?}",
                                     self_addr.0, self_addr.1, cmd);
-                                // we don't want to read from this guy anymore
                                 // he tried to impersonate a system node, so he won't even get
                                 // StatusCode::AuthFailure
-                                // (though we still allow him to connect again)
-                                return;
+                                continue;
                             }
 
                             trace!("[{}:{}]: Received valid SYSTEM command {}",
