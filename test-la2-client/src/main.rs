@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::time::Duration;
+use std::env;
 
 use assignment_2_solution::{
     ClientCommandHeader, ClientCommandResponse, ClientRegisterCommand,
@@ -9,11 +9,15 @@ use assignment_2_solution::{
 use serde_big_array::Array;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
+use std::io::Write;
 
 // Configuration constants
 const HMAC_TAG_SIZE: usize = 32;
 const TARGET_HOST: &str = "127.0.0.1";
-const TARGET_PORT: u16 = 8080;
+// const TARGET_PORT: u16 = 8080;
+const PORT_0: u16 = 8080;
+const PORT_1: u16 = 8081;
 
 // !! IMPORTANT !!
 // Both the Server and this Client must use the SAME key. 
@@ -31,6 +35,25 @@ pub struct RegisterResponse {
 struct RegisterClient {
     stream: TcpStream,
     hmac_key: Vec<u8>,
+}
+
+pub fn init_logs() {
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Trace)
+        // .format(|buf, record| { // NO Timestamps
+        //     writeln!(buf, "{}", record.args())
+        // })
+        .format(|buf, record| { // precise timestamps
+            writeln!(
+                buf,
+                "{} [{}] - {}",
+                buf.timestamp_millis(),
+                record.level(),
+                record.args()
+            )
+        })
+        .try_init();
 }
 
 impl RegisterClient {
@@ -114,17 +137,14 @@ impl RegisterClient {
     }
 }
 
-async fn concurrent_operations_scenario() {
-    println!("--- Starting Client Scenario ---");
-    println!("Target: {}:{}", TARGET_HOST, TARGET_PORT);
-    
+async fn concurrent_operations_write() {
     let n_clients = 16;
     let mut clients = Vec::new();
 
     // 1. Establish connections
     println!("Connecting {} clients...", n_clients);
     for _ in 0..n_clients {
-        clients.push(RegisterClient::connect(TARGET_HOST, TARGET_PORT, FIXED_CLIENT_KEY.to_vec()).await);
+        clients.push(RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await);
     }
 
     // 2. Send WRITE commands concurrently (iterating logic)
@@ -158,6 +178,11 @@ async fn concurrent_operations_scenario() {
              eprintln!("Warning: Received non-OK status: {:?}", resp.content.status);
         }
     }
+}
+
+async fn concurrent_operations_read() {
+    let n_clients = 16;
+    let mut client = RegisterClient::connect(TARGET_HOST, PORT_0, FIXED_CLIENT_KEY.to_vec()).await;
 
     // 4. Send READ command (using the first client connection)
     println!("Sending READ command verification...");
@@ -169,12 +194,12 @@ async fn concurrent_operations_scenario() {
         content: ClientRegisterCommandContent::Read,
     });
     
-    clients[0].send_cmd(&read_cmd).await;
+    client.send_cmd(&read_cmd).await;
 
     println!("Sent READ");
 
     // 5. Verify data
-    let response = clients[0].read_response().await;
+    let response = client.read_response().await;
 
     println!("Received READ response");
     
@@ -182,11 +207,243 @@ async fn concurrent_operations_scenario() {
         OperationReturn::Read { read_data: SectorVec(sector) } => {
             let is_pattern_a = *sector == Array([1; 4096]);
             let is_pattern_b = *sector == Array([254; 4096]);
-            let is_pattern_c = *sector == Array([69; 4096]);
-
-            // if is_pattern_a || is_pattern_b {
-            if is_pattern_c {
+            
+            if is_pattern_a || is_pattern_b {
                 println!("SUCCESS: Read data matches one of the written patterns.");
+            } else {
+                eprintln!("FAILURE: Data read back did not match any written pattern.");
+                panic!("Data verification failed");
+            }
+        }
+        _ => panic!("Expected Read operation return, got Write or other."),
+    }
+}
+
+async fn multiple_clients_write() {
+    let n_clients = 250;
+
+    // 1. Establish connections, send WRITE commands and receive responses concurrently
+    println!("Connecting {} clients...", n_clients);
+
+    let mut handles = Vec::with_capacity(n_clients);
+
+    for idx in 0..n_clients {
+        let handle = tokio::spawn(async move {
+            let mut client = RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await;
+            
+            // Create the command
+            let cmd = RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: idx as u64,
+                    sector_idx: idx as u64,
+                },
+                content: ClientRegisterCommandContent::Write {
+                    data: SectorVec(Box::new(Array([(idx % 255) as u8; 4096])))
+                },
+            });
+    
+            client.send_cmd(&cmd).await;
+
+            let resp = client.read_response().await;
+
+            if let StatusCode::Ok = resp.content.status {
+                // OK
+            } else {
+                    eprintln!("Warning: Received non-OK status: {:?}", resp.content.status);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        if let Err(e) = handle.await {
+            eprintln!("Task failed to join: {:?}", e);
+        }
+    }
+}
+
+async fn multiple_clients_read() {
+    let n_clients = 250;
+
+    // 1. Establish connections, send WRITE commands and receive responses concurrently
+    println!("Connecting {} clients...", n_clients);
+
+    let mut set = JoinSet::new();
+
+    for idx in 0..n_clients {
+        set.spawn(async move {
+            let mut client = RegisterClient::connect(TARGET_HOST, PORT_0, FIXED_CLIENT_KEY.to_vec()).await;
+            
+            // Create the command
+            let cmd = RegisterCommand::Client(ClientRegisterCommand {
+                header: ClientCommandHeader {
+                    request_identifier: idx + n_clients,
+                    sector_idx: idx,
+                },
+                content: ClientRegisterCommandContent::Read
+            });
+    
+            client.send_cmd(&cmd).await;
+
+            let response = client.read_response().await;
+
+            match response.content.op_return {
+                OperationReturn::Read { read_data: SectorVec(sector) } => {           
+                    if *sector == Array([(idx % 255) as u8; 4096]) {
+                        println!("SUCCESS: Read data for sector {idx} is good.");
+                    } else {
+                        eprintln!("FAILURE: Data read back did not match any written pattern.");
+                        panic!("Data verification failed");
+                    }
+                }
+                _ => panic!("Expected Read operation return, got Write or other."),
+            }
+        });
+    }
+
+    set.join_all().await;
+}
+
+async fn write_67() {
+    println!("Test: write_67");
+
+    // 1. Establish connections
+    println!("Connecting 1 client...");
+    let mut client = RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await;
+
+    // 2. Send WRITE commands concurrently (iterating logic)
+    println!("Sending WRITE command...");
+    let request_id = 67;
+    
+    // Create the command
+    let cmd = RegisterCommand::Client(ClientRegisterCommand {
+        header: ClientCommandHeader {
+            request_identifier: request_id,
+            sector_idx: 0,
+        },
+        content: ClientRegisterCommandContent::Write {
+            data: SectorVec(Box::new(Array([67; 4096]))),
+        },
+    });
+
+    client.send_cmd(&cmd).await;
+
+    // 3. Read responses for WRITES
+    println!("Reading WRITE responses...");
+    let resp = client.read_response().await;
+    if let StatusCode::Ok = resp.content.status {
+        // OK
+    } else {
+            eprintln!("Warning: Received non-OK status: {:?}", resp.content.status);
+    }
+}
+
+async fn write_69() {
+    println!("Test: write_69");
+
+    // 1. Establish connections
+    println!("Connecting 1 client...");
+    let mut client = RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await;
+
+    // 2. Send WRITE commands concurrently (iterating logic)
+    println!("Sending WRITE command...");
+    let request_id = 69;
+    
+    // Create the command
+    let cmd = RegisterCommand::Client(ClientRegisterCommand {
+        header: ClientCommandHeader {
+            request_identifier: request_id,
+            sector_idx: 0,
+        },
+        content: ClientRegisterCommandContent::Write {
+            data: SectorVec(Box::new(Array([69; 4096]))),
+        },
+    });
+
+    client.send_cmd(&cmd).await;
+
+    // 3. Read responses for WRITES
+    println!("Reading WRITE responses...");
+    let resp = client.read_response().await;
+    if let StatusCode::Ok = resp.content.status {
+        // OK
+    } else {
+            eprintln!("Warning: Received non-OK status: {:?}", resp.content.status);
+    }
+}
+
+async fn read_67() {
+    println!("Test: read_67");
+
+    // 1. Establish connections
+    println!("Connecting 1 client...");
+    let mut client = RegisterClient::connect(TARGET_HOST, PORT_0, FIXED_CLIENT_KEY.to_vec()).await;
+
+    // 2. Send WRITE commands concurrently (iterating logic)
+    println!("Sending WRITE command...");
+    let request_id = 67 + 100;
+    
+    // Create the command
+    let cmd = RegisterCommand::Client(ClientRegisterCommand {
+        header: ClientCommandHeader {
+            request_identifier: request_id,
+            sector_idx: 0,
+        },
+        content: ClientRegisterCommandContent::Read
+    });
+
+    client.send_cmd(&cmd).await;
+
+    // 3. Read responses for WRITES
+    println!("Reading READ responses...");
+    let response = client.read_response().await;
+    println!("Received READ response");
+    
+    match response.content.op_return {
+        OperationReturn::Read { read_data: SectorVec(sector) } => {
+            if *sector == Array([67; 4096]) {
+                println!("SUCCESS: Read 67");
+            } else {
+                eprintln!("FAILURE: Data read back did not match any written pattern.");
+                panic!("Data verification failed");
+            }
+        }
+        _ => panic!("Expected Read operation return, got Write or other."),
+    }
+}
+
+async fn read_69() {
+    println!("Test: read_69");
+
+    // 1. Establish connections
+    println!("Connecting 1 client...");
+    let mut client = RegisterClient::connect(TARGET_HOST, PORT_0, FIXED_CLIENT_KEY.to_vec()).await;
+
+    // 2. Send WRITE commands concurrently (iterating logic)
+    println!("Sending WRITE command...");
+    let request_id = 69 + 100;
+    
+    // Create the command
+    let cmd = RegisterCommand::Client(ClientRegisterCommand {
+        header: ClientCommandHeader {
+            request_identifier: request_id,
+            sector_idx: 0,
+        },
+        content: ClientRegisterCommandContent::Read
+    });
+
+    client.send_cmd(&cmd).await;
+
+    // 3. Read responses for WRITES
+    println!("Reading READ responses...");
+    let response = client.read_response().await;
+    println!("Received READ response");
+    
+    match response.content.op_return {
+        OperationReturn::Read { read_data: SectorVec(sector) } => {
+            if *sector == Array([69; 4096]) {
+                println!("SUCCESS: Read Read 69.");
             } else {
                 eprintln!("FAILURE: Data read back did not match any written pattern.");
                 panic!("Data verification failed");
@@ -198,10 +455,43 @@ async fn concurrent_operations_scenario() {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    init_logs();
+
+    // 2. Parse arguments
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        eprintln!("Usage: {} <port_range_start>", args[0]);
+        std::process::exit(1);
+    }
+
+    let op_code: u16 = match args[1].parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Error: Operation code must be a valid 16-bit integer.");
+            std::process::exit(1);
+        }
+    };
     
     // Wait a brief moment to ensure connection isn't instant if executed via script
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // tokio::time::sleep(Duration::from_millis(100)).await;
 
-    concurrent_operations_scenario().await;
+    println!("--- Starting Client Scenario ---");
+    // println!("Target: {}:{}", TARGET_HOST, TARGET_PORT);
+
+    match op_code {
+        0 => concurrent_operations_write().await,
+        100 => concurrent_operations_read().await,
+
+        1 => multiple_clients_write().await,
+        101 => multiple_clients_read().await,
+
+        67 => write_67().await,
+        167 => read_67().await,
+
+        69 => write_69().await,
+        169 => read_69().await,
+
+        code => { println!("Unsupported operation code {code}"); }
+    }
 }

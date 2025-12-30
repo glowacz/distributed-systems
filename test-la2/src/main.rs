@@ -1,4 +1,4 @@
-use std::convert::TryInto;
+use std::{convert::TryInto, path::Path};
 use std::env;
 use std::time::Duration;
 use std::io::Write;
@@ -8,7 +8,6 @@ use assignment_2_solution::{
     ClientCommandResponse, Configuration, PublicConfiguration, 
     run_register_process,
 };
-use tempfile::TempDir;
 use tokio::time::sleep;
 
 pub const HMAC_TAG_SIZE: usize = 32;
@@ -23,7 +22,6 @@ pub struct RegisterResponse {
 pub struct TestProcessesConfig {
     hmac_client_key: Vec<u8>,
     hmac_system_key: Vec<u8>,
-    storage_dirs: Vec<TempDir>,
     tcp_locations: Vec<(String, u16)>,
 }
 
@@ -69,9 +67,6 @@ impl TestProcessesConfig {
             hmac_client_key: Vec::from(FIXED_CLIENT_KEY),
             // hmac_system_key: (0..64).map(|_| rng.gen_range(0..255)).collect(),
             hmac_system_key: Vec::from(FIXED_SYSTEM_KEY),
-            storage_dirs: (0..processes_count)
-                .map(|_| tempfile::tempdir().unwrap())
-                .collect(),
             tcp_locations
         }
     }
@@ -79,12 +74,7 @@ impl TestProcessesConfig {
     fn config(&self, proc_idx: usize) -> Configuration {
         Configuration {
             public: PublicConfiguration {
-                storage_dir: self
-                    .storage_dirs
-                    .get(proc_idx)
-                    .unwrap()
-                    .path()
-                    .to_path_buf(),
+                storage_dir: Path::new(&format!("/tmp/ADD/{proc_idx}")).to_path_buf(),
                 tcp_locations: self.tcp_locations.clone(),
                 self_rank: u8::try_from(proc_idx + 1).unwrap(),
                 n_sectors: TestProcessesConfig::N_SECTORS,
@@ -95,7 +85,7 @@ impl TestProcessesConfig {
     }
 
     pub async fn start(&self, idx: usize) {
-        let processes_count = self.storage_dirs.len();
+        let processes_count = self.tcp_locations.len();
         println!("Starting {} processes...", processes_count);
         
         // for idx in 0..processes_count {
