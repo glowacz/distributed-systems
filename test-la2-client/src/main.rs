@@ -160,8 +160,7 @@ async fn concurrent_operations_write() {
             },
             content: ClientRegisterCommandContent::Write {
                 // Alternating pattern: Client 0 writes 1s, Client 1 writes 254s, etc.
-                // data: SectorVec(Box::new(Array([if i % 2 == 0 { 1 } else { 254 }; 4096]))),
-                data: SectorVec(Box::new(Array([69; 4096]))),
+                data: SectorVec(Box::new(Array([if i % 2 == 0 { 1 } else { 254 }; 4096]))),
             },
         });
 
@@ -303,6 +302,84 @@ async fn multiple_clients_read() {
     }
 
     set.join_all().await;
+}
+
+async fn serial_writes() {
+    let n = 50;
+
+    for i in 0..n {
+        let idx = i as u64;
+
+        // 1. Establish connections
+        println!("Connecting client {i}...");
+        let mut client = RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await;
+        
+        // Create the command
+        let cmd = RegisterCommand::Client(ClientRegisterCommand {
+            header: ClientCommandHeader {
+                request_identifier: idx,
+                sector_idx: idx,
+            },
+            content: ClientRegisterCommandContent::Write {
+                // Alternating pattern: Client 0 writes 1s, Client 1 writes 254s, etc.
+                data: SectorVec(Box::new(Array([(idx % 255) as u8; 4096])))
+            },
+        });
+
+        // 2. Send WRITE commands concurrently (iterating logic)
+        println!("Sending WRITE command {i}...");
+
+        client.send_cmd(&cmd).await;
+
+        // really making it serial: waiting for response before sending next write
+        let resp = client.read_response().await;
+        if let StatusCode::Ok = resp.content.status {
+            // OK
+        } else {
+             eprintln!("Warning: Received non-OK status: {:?}", resp.content.status);
+        }
+    }
+}
+
+async fn serial_reads() {
+    let n = 50;
+
+    for i in 0..n {
+        let idx = i as u64;
+
+        // 1. Establish connections
+        println!("Connecting client {i}...");
+        let mut client = RegisterClient::connect(TARGET_HOST, PORT_1, FIXED_CLIENT_KEY.to_vec()).await;
+        
+        // Create the command
+        let cmd = RegisterCommand::Client(ClientRegisterCommand {
+            header: ClientCommandHeader {
+                request_identifier: idx + n,
+                sector_idx: idx,
+            },
+            content: ClientRegisterCommandContent::Read
+        });
+
+        // 2. Send READ commands concurrently (iterating logic)
+        println!("Sending READ command {i}...");
+
+        client.send_cmd(&cmd).await;
+
+        // really making it serial: waiting for response before sending next read
+        let response = client.read_response().await;
+        
+        match response.content.op_return {
+            OperationReturn::Read { read_data: SectorVec(sector) } => {           
+                if *sector == Array([(idx % 255) as u8; 4096]) {
+                    println!("SUCCESS: Read data for sector {idx} is good.");
+                } else {
+                    eprintln!("FAILURE: Data read back did not match any written pattern.");
+                    panic!("Data verification failed");
+                }
+            }
+            _ => panic!("Expected Read operation return, got Write or other."),
+        }
+    }
 }
 
 async fn write_67() {
@@ -485,6 +562,9 @@ async fn main() {
 
         1 => multiple_clients_write().await,
         101 => multiple_clients_read().await,
+
+        2 => serial_writes().await,
+        102 => serial_reads().await,
 
         67 => write_67().await,
         167 => read_67().await,
