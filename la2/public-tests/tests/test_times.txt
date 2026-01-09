@@ -1,0 +1,16 @@
+STUDENTS:
+test multiple_nodes_multiple_sectors ... finished in 1.29s (50 sectors, fixed ACKs, release)
+test multiple_nodes_multiple_sectors ... finished in 4.18s (250 sectors, fixed ACKs, release)
+test multiple_nodes_multiple_sectors ... finished in 4.39s (250 sectors, fixed ACKs, no TCP to self, release)
+(different time, server more busy => slower; skipping sending to self shaves off ~0.1s in this test)
+
+MY PC:
+test concurrent_operations_on_the_same_sector ... finished in 5.84s
+test large_number_of_operations_execute_successfully ... finished in 10.89s
+test multiple_nodes_multiple_sectors ... finished in 16.83s (50 sectors)
+test multiple_nodes_multiple_sectors ... finished in 0.98s (50 sectors, all ACKs disabled)
+test multiple_nodes_multiple_sectors ... finished in 0.65s (50 sectors, all ACKs disabled AND writing to disk disabled)
+test multiple_nodes_multiple_sectors ... finished in 83.10s (250 sectors)
+
+test multiple_nodes_multiple_sectors ... finished in 1.16s (50 sectors, fixed ACKs)
+test multiple_nodes_multiple_sectors ... finished in 0.82s (50 sectors, fixed ACKs, release)
