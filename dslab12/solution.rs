@@ -99,21 +99,21 @@ impl<const N: usize> Process<N> {
     }
 
     async fn process_remote_op(&mut self, mut op: Operation) {
-        println!("Processing remote op {op:?}");
+        // println!("Processing remote op {op:?}");
 
         for other_op in &self.log[self.current_round_start_index..] {
             op.action = Self::transform(op.action, op.process_rank, &other_op.action, other_op.process_rank);
         }
 
         self.log.push(op.clone());
-        println!("Sending edit to client {:?}", op.action);
+        // println!("Sending edit to client {:?}", op.action);
         self.client.send(Edit { action: op.action }).await;
         
         self.recvd_from.insert(op.process_rank);
     }
 
     async fn process_client_request(&mut self, request: EditRequest) {
-        println!("Processing client request {request:?}");
+        // println!("Processing client request {request:?}");
 
         let mut transformed_action = request.action;
 
@@ -130,7 +130,7 @@ impl<const N: usize> Process<N> {
         self.log.push(op.clone());
         self.broadcast.send(op).await;
 
-        println!("Sending edit to client {:?}", transformed_action);
+        // println!("Sending edit to client {:?}", transformed_action);
         self.client.send(Edit { action: transformed_action }).await;
     }
 
@@ -139,18 +139,18 @@ impl<const N: usize> Process<N> {
             process_rank: self.rank,
             action: Action::Nop
         };
-        println!("Processing NOP");
+        // println!("Processing NOP");
 
         self.recvd_from.insert(self.rank);
         self.log.push(op.clone());
         self.broadcast.send(op).await;
         
-        println!("Sending NOP to client");
+        // println!("Sending NOP to client");
         self.client.send(Edit { action: Action::Nop }).await;
     }
 
     async fn do_work(&mut self) {
-        println!("{}: do_work start", self.rank);
+        // println!("{}: do_work start", self.rank);
         let mut progress;
         // for _i in 0.. {
         loop {
@@ -195,22 +195,14 @@ impl<const N: usize> Process<N> {
             }
         }
 
-        println!("{}: do_work end", self.rank);
+        // println!("{}: do_work end", self.rank);
     }
 }
 
 #[async_trait::async_trait]
 impl<const N: usize> Handler<Operation> for Process<N> {
     async fn handle(&mut self, msg: Operation) {
-        // let queue = self.pending_from_others.get_mut(&msg.process_rank).unwrap();
-        // queue.push_back(msg);
-        // if self.recvd_from.contains(&msg.process_rank) {
-        //     self.future_from_others.push_back(msg);
-        // }
-        // else {
-        //     self.pending_from_others.push_back(msg);
-        // }
-        println!("{}: Handling op {:?}", self.rank, msg);
+        // println!("{}: Handling op {:?}", self.rank, msg);
         self.pending_from_others.push_back(msg);
         self.do_work().await;
     }
@@ -219,7 +211,7 @@ impl<const N: usize> Handler<Operation> for Process<N> {
 #[async_trait::async_trait]
 impl<const N: usize> Handler<EditRequest> for Process<N> {
     async fn handle(&mut self, request: EditRequest) {
-        println!("{}: Handling client request {:?}", self.rank, request);
+        // println!("{}: Handling client request {:?}", self.rank, request);
         self.pending_from_client.push_back(request);
         self.do_work().await;
     }

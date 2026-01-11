@@ -83,7 +83,7 @@ struct InitClient<const N: usize> {
     process: ModuleRef<Process<N>>,
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 struct InternalClientCommand {
     action: Action,
 }
@@ -114,13 +114,15 @@ impl<const N: usize> Handler<InitClient<N>> for SimpleClient<N> {
 #[async_trait::async_trait]
 impl<const N: usize> Handler<InternalClientCommand> for SimpleClient<N> {
     async fn handle(&mut self, msg: InternalClientCommand) {
-        println!("{}: Handling internal client command {:?}", self.rank, msg);
+        // println!("{}: Handling internal client command", self.rank);
         match msg.action {
             Action::Insert { idx, .. } => {
-                assert!(idx <= self.text.len(), "{}: Invalid idx {idx}! ({msg:?})\nCurrent text is {}", self.rank, self.text);
+                // assert!(idx <= self.text.len(), "{}: Invalid idx {idx}! ({msg:?})\nCurrent text is {}", self.rank, self.text);
+                assert!(idx <= self.text.len(), "{}: Invalid idx {idx}!\nCurrent text is {}", self.rank, self.text);
             }
             Action::Delete { idx } => {
-                assert!(idx < self.text.len(), "{}: Invalid idx {idx}! ({msg:?})", self.rank);
+                assert!(idx < self.text.len(), "{}: Invalid idx {idx}!", self.rank);
+                // assert!(idx < self.text.len(), "{}: Invalid idx {idx}! ({msg:?})", self.rank);
             }
             Action::Nop => {
                 panic!("Client cannot request NOP!");

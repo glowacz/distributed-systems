@@ -40,9 +40,8 @@ where
 }
 
 /// Actions (edits) which can be applied to a text.
-#[derive(Clone, Debug)]
-// #[cfg_attr(test, derive(PartialEq, Debug))]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
 pub(crate) enum Action {
     /// Insert the character at the position.
     Insert { idx: usize, ch: char },
@@ -71,7 +70,7 @@ impl Action {
 }
 
 /// Client's request to edit the text.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct EditRequest {
     /// Total number of operations a client has applied to its text so far.
     pub(crate) num_applied: usize,
@@ -80,12 +79,12 @@ pub(crate) struct EditRequest {
 }
 
 /// Response to a client with action (edit) it should apply to its text.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Edit {
     pub(crate) action: Action,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Operation {
     /// Rank of a process which issued this operation.
     pub(crate) process_rank: usize,
