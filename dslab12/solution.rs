@@ -15,16 +15,10 @@ pub(crate) struct Process<const N: usize> {
     broadcast: Box<dyn ReliableBroadcastRef<N>>,
     /// Reference to the process's client.
     client: Box<dyn ClientRef>,
-    // log of all operations as if 
-    // they were issued at the beginning of their round
-    // so, the ops from other processes are original
-    // and from our client are transformed to match 
-    // the beginning of the round
     log: Vec<Operation>,
     recvd_from: HashSet<usize>,
     current_round_start_index: usize,
     pending_from_client: VecDeque<EditRequest>,
-    // pending_from_others: HashMap<usize, VecDeque<Operation>>
     pending_from_others: VecDeque<Operation>,
     future_from_others: VecDeque<Operation>,
 }
@@ -43,7 +37,6 @@ impl<const N: usize> Process<N> {
             recvd_from: HashSet::new(),
             current_round_start_index: 0,
             pending_from_client: VecDeque::new(),
-            // pending_from_others: HashMap::new()
             pending_from_others: VecDeque::new(),
             future_from_others: VecDeque::new(),
         }
@@ -57,7 +50,6 @@ impl<const N: usize> Process<N> {
     ) -> Action {
         match (action, wrt) {
             (Action::Insert { idx: p1, ch: c1 }, Action::Insert { idx: p2, .. }) => {
-                // [cite: 76]
                 if p1 < *p2 {
                     Action::Insert { idx: p1, ch: c1 }
                 } else if p1 == *p2 && r1 < r2 {
@@ -67,7 +59,6 @@ impl<const N: usize> Process<N> {
                 }
             }
             (Action::Delete { idx: p1 }, Action::Delete { idx: p2 }) => {
-                // [cite: 77]
                 if p1 < *p2 {
                     Action::Delete { idx: p1 }
                 } else if p1 == *p2 {
@@ -77,7 +68,6 @@ impl<const N: usize> Process<N> {
                 }
             }
             (Action::Insert { idx: p1, ch: c1 }, Action::Delete { idx: p2 }) => {
-                // [cite: 78]
                 if p1 <= *p2 {
                     Action::Insert { idx: p1, ch: c1 }
                 } else {
@@ -85,14 +75,12 @@ impl<const N: usize> Process<N> {
                 }
             }
             (Action::Delete { idx: p1 }, Action::Insert { idx: p2, .. }) => {
-                // [cite: 79]
                 if p1 < *p2 {
                     Action::Delete { idx: p1 }
                 } else {
                     Action::Delete { idx: p1 + 1 }
                 }
             }
-            // NOP Transformations
             (Action::Nop, _) => Action::Nop,
             (act, Action::Nop) => act,
         }
