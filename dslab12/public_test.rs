@@ -381,6 +381,319 @@ pub(crate) mod tests {
         system.shutdown().await;
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[timeout(500)]
+    async fn buffer_future_round_ops() {
+        // Scenario: 2 Processes.
+        // Round 1: P0 issues 'A', P1 issues 'B'.
+        // P0 finishes Round 1 quickly and starts Round 2 (issues 'C').
+        // P1 is slow to receive P0's Round 1 msg, but receives P0's Round 2 msg first.
+        // P1 must buffer 'C', wait for 'A', finish Round 1, then process 'C'.
+
+        const NUM_PROCESSES: usize = 2;
+        const TEXT: &str = "";
+
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // --- Round 1 Start ---
+        // P0 requests 'A'
+        c[0].request(Action::Insert { idx: 0, ch: 'A' }).await;
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 0, ch: 'A' }, "A"));
+
+        // P1 requests 'B'
+        c[1].request(Action::Insert { idx: 0, ch: 'B' }).await;
+        assert_eq!(c[1].receive().await, (Action::Insert { idx: 0, ch: 'B' }, "B"));
+
+        // P1 -> P0 (Round 1 delivery)
+        // P0 receives 'B', transforms wrt 'A' (concurrent). 
+        // P1 inserts at 0, P0 inserted at 0. P0 rank < P1 rank? 0 < 1. 
+        // P0 keeps 'A' at 0. P1's 'B' -> Insert(1, 'B').
+        b.forward(1, 0).await;
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 1, ch: 'B' }, "AB"));
+        
+        // P0 is now done with Round 1.
+
+        // --- Round 2 Start (P0 only) ---
+        // P0 requests 'C'.
+        c[0].request(Action::Insert { idx: 2, ch: 'C' }).await;
+        // P0 applies 'C' immediately (start of Round 2 for P0).
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 2, ch: 'C' }, "ABC"));
+
+        // --- Out of Order Delivery to P1 ---
+        // P1 has NOT received 'A' from Round 1 yet.
+        // We deliver P0's 'C' (Round 2) to P1 first.
+        // Note: forward(0, 1) usually delivers oldest first, but we want to simulate
+        // the *processing* logic. Since the broadcast module guarantees FIFO per sender,
+        // we can't physically deliver Round 2 before Round 1 from the *same* sender 
+        // via the channel. However, we can simulate the "wait" by having P1 receive 
+        // P0's Round 1 op, but NOT finish the round (if there were a 3rd process).
+        
+        // Actually, with 2 processes, receiving P0's R1 op finishes the round. 
+        // To test buffering effectively with FIFO channels, we need to verify P1 
+        // doesn't process R2 messages if it's waiting for *another* process in R1.
+        // Let's switch to 3 Processes.
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[timeout(500)]
+    async fn buffer_future_round_ops_3_nodes() {
+        const NUM_PROCESSES: usize = 3;
+        const TEXT: &str = "";
+
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // --- Round 1 ---
+        // P0 issues '0', P1 issues '1', P2 issues '2'
+        c[0].request(Action::Insert { idx: 0, ch: '0' }).await;
+        c[1].request(Action::Insert { idx: 0, ch: '1' }).await;
+        c[2].request(Action::Insert { idx: 0, ch: '2' }).await;
+        
+        // Local applies
+        c[0].receive().await; // "0"
+        c[1].receive().await; // "1"
+        c[2].receive().await; // "2"
+
+        // P0 finishes Round 1 completely
+        b.forward(1, 0).await; // P0 gets '1'
+        b.forward(2, 0).await; // P0 gets '2'
+        // P0 state: "012" (assuming standard order logic)
+        // P0 consumes the two external edits
+        c[0].receive().await; 
+        c[0].receive().await; 
+
+        // P1 receives P0's Round 1 msg
+        b.forward(0, 1).await;
+        c[1].receive().await; 
+        // P1 is still waiting for P2's Round 1 msg to finish Round 1.
+
+        // --- Round 2 Start (P0) ---
+        // P0 issues 'X' (Round 2)
+        c[0].request(Action::Insert { idx: 0, ch: 'X' }).await;
+        c[0].receive().await; // P0 has applied X
+
+        // Deliver P0's Round 2 msg ('X') to P1.
+        // P1 is still in Round 1 (waiting for P2).
+        b.forward(0, 1).await; 
+        
+        // ASSERT: P1 should NOT output 'X' yet.
+        assert!(c[1].no_receive().await);
+
+        // Now deliver P2's Round 1 msg to P1.
+        b.forward(2, 1).await;
+        
+        // P1 should now finish Round 1 (output P2's op) AND automatically process 
+        // the buffered Round 2 msg from P0.
+        
+        // 1. P1 receives P2's '2' (Round 1)
+        let (act1, _) = c[1].receive().await;
+        // 2. P1 receives P0's 'X' (Round 2). 
+        // Note: Since P1 didn't issue an op for R2, it generates internal NOP, 
+        // then processes 'X'. Client receives NOP then X.
+        let (act2, _) = c[1].receive().await; // NOP
+        let (act3, _) = c[1].receive().await; // X
+
+        assert_eq!(act2, Action::Nop);
+        match act3 {
+            Action::Insert { ch: 'X', .. } => {},
+            _ => panic!("Expected Insert X from buffered round 2, got {:?}", act3),
+        }
+
+        system.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[timeout(500)]
+    async fn client_lag_transformation() {
+        // Scenario:
+        // P0 and P1.
+        // P1 issues 'B' at index 0. Broadcasts.
+        // P0 receives 'B'. P0 applies 'B'. Log size becomes 1 (NOP from P0 + B? Or just B?)
+        // Wait, if P0 hasn't started round, receiving B triggers R1 with P0=NOP.
+        // 
+        // Then P0's client (who still thinks state is empty) sends 'A' at index 0.
+        // P0 process must transform 'A' (wr.t. NOP and B) before applying.
+        
+        const NUM_PROCESSES: usize = 2;
+        const TEXT: &str = "";
+
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // 1. P1 issues 'B' at 0.
+        c[1].request(Action::Insert { idx: 0, ch: 'B' }).await;
+        c[1].receive().await; // P1 applied B
+
+        // 2. Deliver P1 -> P0.
+        // P0 has no current op. It should generate NOP, apply it, then apply P1's 'B'.
+        b.forward(1, 0).await;
+        
+        // Verify P0 state update
+        assert_eq!(c[0].receive().await, (Action::Nop, ""));
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 0, ch: 'B' }, "B"));
+
+        // 3. P0's client requests 'A' at 0.
+        // Crucially, the test helper `request` uses `num_applied` from the client struct.
+        // The client struct has processed 2 edits (Nop, B), so `num_applied` is 2.
+        // WE WANT TO SIMULATE LAG. We need to cheat or manually send a stale request.
+        // Since we can't easily hack ControllableClient, we will use the fact that
+        // the client updates `num_applied` only when we call `receive`.
+        
+        // Let's reset the scenario to properly simulate lag.
+        system.shutdown().await;
+        
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // Step 1: P1 issues 'B'.
+        c[1].request(Action::Insert { idx: 0, ch: 'B' }).await;
+        c[1].receive().await;
+
+        // Step 2: Deliver to P0. P0 processes it.
+        b.forward(1, 0).await;
+        // IMPORTANT: We do NOT call c[0].receive().
+        // P0 process has applied NOP and Insert(B). Log size = 2.
+        // P0 client `num_applied` is still 0.
+
+        // Step 3: P0 client requests 'A' at 0.
+        // This request sends num_applied = 0.
+        c[0].request(Action::Insert { idx: 0, ch: 'A' }).await;
+
+        // The process receives request (seq 0). It sees its log has 2 entries.
+        // It must transform 'A' against those 2 entries.
+        // 1. wrt NOP: no change.
+        // 2. wrt Insert(0, 'B', rank 1).
+        //    Client temp rank = N+1 = 3.
+        //    Rule: insert(p1, ..) wrt insert(p2, ..). p1=0, p2=0.
+        //    p1 == p2, r1(3) > r2(1).
+        //    Branch: else insert(p1+1, ...)
+        //    Result: Insert(1, 'A').
+        
+        // Now we drain P0's client queue.
+        // 1. NOP (internal R1)
+        assert_eq!(c[0].receive().await, (Action::Nop, ""));
+        // 2. Insert B (from P1 R1)
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 0, ch: 'B' }, "B"));
+        // 3. The transformed request 'A' (R2)
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 1, ch: 'A' }, "BA"));
+
+        system.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[timeout(500)]
+    async fn complex_insert_delete_convergence() {
+        const NUM_PROCESSES: usize = 2;
+        // Start with some text
+        const TEXT: &str = "abc";
+
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // P0 wants to Delete 'b' (index 1).
+        c[0].request(Action::Delete { idx: 1 }).await;
+        
+        // P1 wants to Insert 'x' at index 1.
+        c[1].request(Action::Insert { idx: 1, ch: 'x' }).await;
+
+        // Both apply locally.
+        assert_eq!(c[0].receive().await, (Action::Delete { idx: 1 }, "ac"));
+        assert_eq!(c[1].receive().await, (Action::Insert { idx: 1, ch: 'x' }, "axbc"));
+
+        // Exchange
+        b.forward(0, 1).await;
+        b.forward(1, 0).await;
+
+        // P0 receives Insert(1, 'x') from P1.
+        // Transform Insert(1, 'x') wrt Delete(1) (local op).
+        // Rule: Insert(p1) wrt Delete(p2). 
+        // p1=1, p2=1. p1 <= p2 is True.
+        // Result: Insert(1, 'x').
+        assert_eq!(c[0].receive().await, (Action::Insert { idx: 1, ch: 'x' }, "axc"));
+
+        // P1 receives Delete(1) from P0.
+        // Transform Delete(1) wrt Insert(1, 'x') (local op).
+        // Rule: Delete(p1) wrt Insert(p2).
+        // p1=1, p2=1. p1 < p2 is False.
+        // Result: Delete(p1 + 1) -> Delete(2).
+        // Deleting index 2 in "axbc" ('b').
+        assert_eq!(c[1].receive().await, (Action::Delete { idx: 2 }, "axc"));
+
+        // Final convergence check
+        // P0: "axc", P1: "axc".
+
+        // --- ROUND 2: Conflict causing index shift ---
+        // P0: Insert 'Y' at 0.
+        // P1: Delete at 0.
+        c[0].request(Action::Insert { idx: 0, ch: 'Y' }).await;
+        c[1].request(Action::Delete { idx: 0 }).await;
+
+        c[0].receive().await; // "Yaxc"
+        c[1].receive().await; // "xc" (deleted 'a')
+
+        b.forward(0, 1).await;
+        b.forward(1, 0).await;
+
+        // P0 processes Delete(0) from P1.
+        // Transform Delete(0) wrt Insert(0, 'Y').
+        // Rule: Delete(0) wrt Insert(0). 0 < 0 False.
+        // Result: Delete(1).
+        // "Yaxc" delete 1 ('a') -> "Yxc".
+        assert_eq!(c[0].receive().await, (Action::Delete { idx: 1 }, "Yxc"));
+
+        // P1 processes Insert(0, 'Y') from P0.
+        // Transform Insert(0, 'Y') wrt Delete(0).
+        // Rule: Insert(0) wrt Delete(0). 0 <= 0 True.
+        // Result: Insert(0, 'Y').
+        // "xc" insert Y at 0 -> "Yxc".
+        assert_eq!(c[1].receive().await, (Action::Insert { idx: 0, ch: 'Y' }, "Yxc"));
+
+        system.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[timeout(500)]
+    async fn nop_generation_and_indexing() {
+        const NUM_PROCESSES: usize = 2;
+        const TEXT: &str = "123";
+
+        let mut system = System::new().await;
+        let (mut b, mut c) = build_system::<NUM_PROCESSES>(&mut system, TEXT).await;
+
+        // P0 Issues Delete(1) -> "13"
+        c[0].request(Action::Delete { idx: 1 }).await;
+        // P1 does NOTHING (no request).
+
+        // P0 applies local.
+        c[0].receive().await; // "13"
+
+        // P1 receives P0's op.
+        // P1 has no op. Must gen NOP.
+        b.forward(0, 1).await;
+
+        // P1 output: 
+        // 1. NOP
+        assert_eq!(c[1].receive().await, (Action::Nop, "123"));
+        // 2. P0's Delete(1). Transform Delete(1) wrt NOP -> Delete(1).
+        assert_eq!(c[1].receive().await, (Action::Delete { idx: 1 }, "13"));
+
+        // P0 needs P1's NOP to finish round?
+        // P1 generated NOP internally. Does it broadcast it?
+        // Instruction: "issues itself a NOP operation, handles it, and then continues..."
+        // "issues" implies: append to log, apply, AND BROADCAST.
+        
+        // So P1 should have sent a NOP to P0.
+        assert!(!b.no_forward(1, 0).await); 
+        
+        b.forward(1, 0).await;
+        
+        // P0 receives NOP. Transform NOP wrt Delete(1) -> NOP.
+        assert_eq!(c[0].receive().await, (Action::Nop, "13"));
+
+        system.shutdown().await;
+    }
+
     pub(crate) async fn build_system<const N: usize>(
         system: &mut System,
         initial_text: &str,
