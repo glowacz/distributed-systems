@@ -3,6 +3,7 @@ use std::cmp;
 use module_system::{Handler, ModuleRef, System};
 
 pub use domain::*;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 mod domain;
@@ -19,8 +20,11 @@ pub struct Raft {
     current_term: u64,
     voted_for: Option<Uuid>,
     log: Vec<LogEntry>,
-    commit_index: u64,
+    commit_index: usize,
     last_applied: u64,
+
+    known_leader: Option<Uuid>,
+    module_ref: ModuleRef<Self>,
 
     config: ServerConfig,
     state_machine: Box<dyn StateMachine>,
@@ -39,20 +43,40 @@ impl Raft {
         stable_storage: Box<dyn StableStorage>,
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
-        let raft = Raft {
-            role: Role::Follower,
-            current_term: 0,
-            voted_for: None,
-            log: Vec::new(),
-            commit_index: 0,
-            last_applied: 0,
-            config,
-            state_machine,
-            stable_storage,
-            message_sender,
-        };
+        system.register_module(|module_ref| 
+            Raft {
+                role: Role::Follower,
+                current_term: 0,
+                voted_for: None,
+                log: Vec::new(),
+                commit_index: 0,
+                last_applied: 0,
+                known_leader: None,
+                module_ref,
+                config,
+                state_machine,
+                stable_storage,
+                message_sender,
+            }
+        ).await
+    }
 
-        system.register_module(|_raft_ref| raft).await
+    async fn broadcast(&self, msg: RaftMessage) {
+        let servers = self.config.servers.clone();
+        let message_sender = self.message_sender;
+        let self_id = self.config.self_id;
+
+        tokio::spawn( async move {
+            let mut set = JoinSet::new();
+            for uuid in servers {
+                if uuid != self_id {
+                    let sender = message_sender.clone();
+                    set.spawn(async move {
+                        message_sender.send(&uuid, msg.clone()).await;
+                    });    
+                }
+            }
+        });
     }
 
     async fn send_append_entries_response(&mut self, target: Uuid, success: bool, last_verified_log_index: usize) {
@@ -73,6 +97,8 @@ impl Raft {
     }
 
     async fn handle_append_entries(&mut self, header: RaftMessageHeader, args: AppendEntriesArgs) {
+        self.known_leader = Some(header.source);
+
         if header.term < self.current_term {
             self.send_append_entries_response(header.source, false, 0).await;
             return;
@@ -80,6 +106,7 @@ impl Raft {
 
         if args.entries.is_empty() {
             // TODO: handle this - restart election timeout
+            // and apply the entries up to the args.leader_commit
             return;
         }
 
@@ -121,12 +148,80 @@ impl Raft {
         let last_new_entry_index = args.prev_log_index + args.entries.len();
 
         if args.leader_commit > self.commit_index as usize {
-            self.commit_index = cmp::min(args.leader_commit, last_new_entry_index) as u64;
+            self.commit_index = cmp::min(args.leader_commit, last_new_entry_index);
         }
 
-        // TODO: apply the operation to the state machine to state machine (lastApplied) usually happens asynchronously
+        // TODO: apply the operation to the state machine to state machine
 
         self.send_append_entries_response(header.source, true, last_new_entry_index).await;
+    }
+
+    async fn handle_command_leader(&mut self, 
+        data: Vec<u8>,
+        client_id: Uuid,
+        sequence_num: u64,
+        lowest_sequence_num_without_response: u64
+    ) {
+        let log_entry = LogEntry {
+            content: LogEntryContent::Command { 
+                data, 
+                client_id, 
+                sequence_num, 
+                lowest_sequence_num_without_response 
+            },
+            term: self.current_term,
+            timestamp: self.config.system_boot_time.elapsed()
+        };
+
+        self.log.push(log_entry.clone());
+
+        let msg = RaftMessage { 
+            header: RaftMessageHeader { 
+                source: self.config.self_id, 
+                term: self.current_term 
+            }, 
+            content: RaftMessageContent::AppendEntries(
+                AppendEntriesArgs { 
+                    prev_log_index: self.log.len() - 1, 
+                    prev_log_term: if self.log.len() >= 2 { self.log[self.log.len() - 2].term} else { 0 },
+                    entries: vec![log_entry],
+                    leader_commit: self.commit_index 
+                }
+            )
+        };
+        
+        self.broadcast(msg).await;
+    }
+
+    async fn handle_client_request(&mut self, msg: ClientRequest) {
+        let responder = msg.reply_to;
+
+        match msg.content {
+            ClientRequestContent::Command { 
+                command, client_id, sequence_num, lowest_sequence_num_without_response 
+            } => {
+                match self.role {
+                    Role::Leader => {
+                        println!("du");
+                    }
+                    _ => {
+                        let resp = ClientRequestResponse::CommandResponse(
+                            CommandResponseArgs { 
+                                client_id, 
+                                sequence_num, 
+                                content: CommandResponseContent::NotLeader { 
+                                    leader_hint: self.known_leader
+                                }
+                            }
+                        );
+                        let _ = responder.send(resp);
+                    }
+                }
+            }
+            _ => {
+                // TODO: maybe reply that we don't handle other client commands
+            }
+        }
     }
 }
 
@@ -152,7 +247,7 @@ impl Handler<RaftMessage> for Raft {
 #[async_trait::async_trait]
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
-        todo!()
+        self.handle_client_request(msg).await;
     }
 }
 
