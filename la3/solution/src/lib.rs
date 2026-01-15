@@ -1,9 +1,12 @@
-use std::{cmp, collections::HashMap, sync::Arc};
+use std::{cmp, collections::{HashMap, HashSet}, sync::Arc};
 
 use module_system::{Handler, ModuleRef, System};
 
 pub use domain::*;
-use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
+use std::ops::RangeInclusive;
+use rand::Rng;
+use tokio::{sync::mpsc::{Receiver, Sender, UnboundedSender, channel}, task::JoinSet, time::sleep};
+use tokio::time::{Duration};
 use uuid::Uuid;
 
 mod domain;
@@ -13,6 +16,8 @@ enum Role {
     Candidate,
     Follower
 }
+
+struct ElectionTimeout;
 
 #[non_exhaustive]
 pub struct Raft {
@@ -28,7 +33,9 @@ pub struct Raft {
     waiting_channels: HashMap<(Uuid, u64), UnboundedSender<ClientRequestResponse>>,
 
     known_leader: Option<Uuid>,
-    module_ref: ModuleRef<Self>,
+    self_ref: ModuleRef<Self>,
+    election_reset_tx: Sender<()>,
+    received_votes: HashSet<Uuid>,
 
     config: ServerConfig,
     state_machine: Box<dyn StateMachine>,
@@ -47,7 +54,10 @@ impl Raft {
         stable_storage: Box<dyn StableStorage>,
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
-        system.register_module(|module_ref| 
+        let (election_reset_tx, election_reset_rx) = channel::<()>(1000);
+        let timeout_range = config.election_timeout_range.clone();
+        
+        let self_ref = system.register_module(|self_ref| 
             Raft {
                 role: Role::Follower,
                 current_term: 0,
@@ -59,13 +69,19 @@ impl Raft {
                 match_index: HashMap::new(),
                 waiting_channels: HashMap::new(),
                 known_leader: None,
-                module_ref,
+                self_ref,
+                election_reset_tx,
+                received_votes: HashSet::new(),
                 config,
                 state_machine,
                 stable_storage,
                 message_sender: message_sender.into(),
             }
-        ).await
+        ).await;
+
+        Self::start_and_reset_election_timeout(self_ref.clone(), timeout_range, election_reset_rx).await;
+
+        self_ref
     }
 
     async fn broadcast(&self, msg: RaftMessage) {
@@ -83,6 +99,25 @@ impl Raft {
                     set.spawn(async move {
                         sender.send(&uuid, msg).await;
                     });    
+                }
+            }
+        });
+    }
+
+    async fn start_and_reset_election_timeout(self_ref: ModuleRef<Self>, timeout_range: RangeInclusive<Duration>, mut reset_rx: Receiver<()>) {
+        // let self_ref = self.self_ref.clone();
+        // let timeout_range = self.config.election_timeout_range.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let timeout = rand::rng().random_range(timeout_range.clone());
+                tokio::select! {
+                    _ = sleep(timeout) => {
+                        let _ = self_ref.send(ElectionTimeout).await;
+                    }
+                    _ = reset_rx.recv() => {
+                        // start new timeout in next loop iteration
+                    }
                 }
             }
         });
@@ -292,6 +327,56 @@ impl Raft {
         }
     }
 
+    async fn send_request_vote_response(&mut self, target: Uuid, vote_granted: bool) {
+        let msg = RaftMessage {
+            header: RaftMessageHeader {
+                source: self.config.self_id,
+                term: self.current_term,
+            },
+            content: RaftMessageContent::RequestVoteResponse(RequestVoteResponseArgs {
+                vote_granted,
+            }),
+        };
+        self.message_sender.send(&target, msg).await;
+    }
+
+    async fn handle_request_vote(&mut self, header: RaftMessageHeader, args: RequestVoteArgs) {
+        if header.term < self.current_term {
+            self.send_request_vote_response(header.source, false).await;
+            return;
+        }
+
+        if let Some(voted_for) = self.voted_for {
+            if voted_for != header.source {
+                self.send_request_vote_response(header.source, false).await;
+                return;
+            }
+        }
+
+        let my_last_log_ind = self.log.len();
+        let my_last_log_term = if my_last_log_ind > 0 {
+            self.log[my_last_log_ind - 1].term
+        } else {
+            0
+        };
+
+        let log_up_to_date = if args.last_log_term > my_last_log_term {
+            true
+        } else if args.last_log_term == my_last_log_term {
+            args.last_log_index >= my_last_log_ind
+        } else {
+            false
+        };
+
+        if log_up_to_date {
+            self.voted_for = Some(header.source);
+            let _ = self.election_reset_tx.send(()).await;
+            self.send_request_vote_response(header.source, true).await;
+        } else {
+            self.send_request_vote_response(header.source, false).await;
+        }
+    }
+
     async fn handle_command_leader(&mut self, 
         data: Vec<u8>,
         client_id: Uuid,
@@ -364,6 +449,29 @@ impl Raft {
             }
         }
     }
+
+    async fn handle_election_timeout(&mut self) {
+        self.received_votes.clear();
+
+        self.current_term += 1;
+        self.role = Role::Candidate;
+
+        let _ = self.election_reset_tx.send(()).await;
+
+        let msg = RaftMessage {
+            header: RaftMessageHeader {
+                source: self.config.self_id,
+                term: self.current_term,
+            },
+            content: RaftMessageContent::RequestVote(
+                RequestVoteArgs { 
+                    last_log_index: self.log.len(), 
+                    last_log_term: self.log[self.log.len() - 1].term 
+                }
+            ),
+        };
+        self.broadcast(msg).await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -380,6 +488,9 @@ impl Handler<RaftMessage> for Raft {
             },
             RaftMessageContent::AppendEntriesResponse(args) => {
                 self.handle_append_entries_response(msg.header, args).await;
+            },
+            RaftMessageContent::RequestVote(args) => {
+                self.handle_request_vote(msg.header, args).await;
             }
             _ => {
                 println!("dupa");
@@ -392,6 +503,15 @@ impl Handler<RaftMessage> for Raft {
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
         self.handle_client_request(msg).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<ElectionTimeout> for Raft {
+    async fn handle(&mut self, _msg: ElectionTimeout) {
+        if let Role::Leader = self.role { } else {
+            self.handle_election_timeout().await;
+        }
     }
 }
 
