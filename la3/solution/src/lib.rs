@@ -1,9 +1,9 @@
-use std::{cmp, sync::Arc};
+use std::{cmp, collections::HashMap, sync::Arc};
 
 use module_system::{Handler, ModuleRef, System};
 
 pub use domain::*;
-use tokio::task::JoinSet;
+use tokio::{sync::mpsc::UnboundedSender, task::JoinSet};
 use uuid::Uuid;
 
 mod domain;
@@ -22,6 +22,10 @@ pub struct Raft {
     log: Vec<LogEntry>,
     commit_index: usize,
     last_applied: u64,
+
+    next_index: HashMap<Uuid, usize>,
+    match_index: HashMap<Uuid, usize>,
+    waiting_channels: HashMap<(Uuid, u64), UnboundedSender<ClientRequestResponse>>,
 
     known_leader: Option<Uuid>,
     module_ref: ModuleRef<Self>,
@@ -51,6 +55,9 @@ impl Raft {
                 log: Vec::new(),
                 commit_index: 0,
                 last_applied: 0,
+                next_index: HashMap::new(),
+                match_index: HashMap::new(),
+                waiting_channels: HashMap::new(),
                 known_leader: None,
                 module_ref,
                 config,
@@ -158,11 +165,139 @@ impl Raft {
         self.send_append_entries_response(header.source, true, last_new_entry_index).await;
     }
 
+    async fn send_append_entries(&mut self, target: Uuid) {
+        let next_idx = *self.next_index.get(&target).unwrap_or(&(self.log.len() + 1));
+        let prev_log_index = if next_idx > 0 { next_idx - 1 } else { 0 };
+        
+        let prev_log_term = if prev_log_index == 0 {
+            0
+        } else {
+            // Log is 0-indexed, so entry N is at N-1
+            if prev_log_index - 1 < self.log.len() {
+                self.log[prev_log_index - 1].term
+            } else {
+                0 // Should not happen if next_idx is managed correctly relative to log
+                // would happen only if we kept sth too big in send_append_entries
+            }
+        };
+
+        let entries = if prev_log_index < self.log.len() {
+             self.log[prev_log_index..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let msg = RaftMessage {
+            header: RaftMessageHeader {
+                source: self.config.self_id,
+                term: self.current_term,
+            },
+            content: RaftMessageContent::AppendEntries(AppendEntriesArgs {
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit: self.commit_index,
+            }),
+        };
+
+        self.message_sender.send(&target, msg).await;
+    }
+
+    async fn handle_append_entries_response(&mut self, header: RaftMessageHeader, args: AppendEntriesResponseArgs) {
+        if let Role::Leader = self.role {
+            // // If response is from a newer term, step down (handled by generic Handler, but checked here for logic flow)
+            // if header.term > self.current_term {
+            //     return; 
+            // }
+
+            let follower = header.source;
+
+            if args.success {
+                // Update match_index and next_index
+                self.match_index.insert(follower, args.last_verified_log_index);
+                self.next_index.insert(follower, args.last_verified_log_index + 1);
+
+                // Check if we can advance commit index
+                self.update_commit_index().await;
+            } else {
+                // Backoff: decrement next_index and retry
+                let current_next = *self.next_index.get(&follower).unwrap_or(&(self.log.len() + 1));
+                let new_next = if current_next > 1 { current_next - 1 } else { 1 };
+                self.next_index.insert(follower, new_next);
+                
+                // Retry immediately with the older log entry
+                self.send_append_entries(follower).await;
+            }
+        }
+    }
+
+    /// Checks if the commit index can be advanced based on match_index of all servers
+    async fn update_commit_index(&mut self) {
+        // Iterate from current commit_index + 1 up to last log entry
+        // We look for the largest N such that a majority of servers have match_index >= N
+        // and log[N].term == current_term
+        
+        let start = self.commit_index + 1;
+        let end = self.log.len();
+
+        for n in (start..=end).rev() {
+            let entry_term = self.log[n - 1].term;
+            if entry_term != self.current_term {
+                continue;
+            }
+
+            let mut count = 1; // Count self
+            for server in &self.config.servers {
+                if *server == self.config.self_id { continue; }
+                
+                if let Some(&matched) = self.match_index.get(server) {
+                    if matched >= n {
+                        count += 1;
+                    }
+                }
+            }
+
+            if count > self.config.servers.len() / 2 {
+                self.commit_index = n;
+                self.apply_committed_entries().await;
+                break;
+            }
+        }
+    }
+
+    /// Applies committed entries to the state machine and replies to clients
+    async fn apply_committed_entries(&mut self) {
+        while self.last_applied < self.commit_index as u64 {
+            self.last_applied += 1;
+            let idx = (self.last_applied - 1) as usize;
+            
+            if idx < self.log.len() {
+                let entry = &self.log[idx];
+                
+                // Only commands produce output for clients
+                if let LogEntryContent::Command { data, client_id, sequence_num, .. } = &entry.content {
+                    let output = self.state_machine.apply(data).await;
+                    
+                    // Send response if we are holding a channel for this request
+                    if let Some(sender) = self.waiting_channels.remove(&(*client_id, *sequence_num)) {
+                         let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                            client_id: *client_id,
+                            sequence_num: *sequence_num,
+                            content: CommandResponseContent::CommandApplied { output }
+                        });
+                        let _ = sender.send(response);
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_command_leader(&mut self, 
         data: Vec<u8>,
         client_id: Uuid,
         sequence_num: u64,
-        lowest_sequence_num_without_response: u64
+        lowest_sequence_num_without_response: u64,
+        reply_to: UnboundedSender<ClientRequestResponse>
     ) {
         let log_entry = LogEntry {
             content: LogEntryContent::Command { 
@@ -176,6 +311,8 @@ impl Raft {
         };
 
         self.log.push(log_entry.clone());
+
+        self.waiting_channels.insert((client_id, sequence_num), reply_to);
 
         let msg = RaftMessage { 
             header: RaftMessageHeader { 
@@ -196,7 +333,7 @@ impl Raft {
     }
 
     async fn handle_client_request(&mut self, msg: ClientRequest) {
-        let responder = msg.reply_to;
+        let reply_to = msg.reply_to;
 
         match msg.content {
             ClientRequestContent::Command { 
@@ -205,7 +342,7 @@ impl Raft {
                 match self.role {
                     Role::Leader => {
                         self.handle_command_leader(
-                            command, client_id, sequence_num, lowest_sequence_num_without_response
+                            command, client_id, sequence_num, lowest_sequence_num_without_response, reply_to
                         ).await;
                     }
                     _ => {
@@ -218,7 +355,7 @@ impl Raft {
                                 }
                             }
                         );
-                        let _ = responder.send(resp);
+                        let _ = reply_to.send(resp);
                     }
                 }
             }
@@ -241,6 +378,9 @@ impl Handler<RaftMessage> for Raft {
             RaftMessageContent::AppendEntries(args) => {
                 self.handle_append_entries(msg.header, args).await;
             },
+            RaftMessageContent::AppendEntriesResponse(args) => {
+                self.handle_append_entries_response(msg.header, args).await;
+            }
             _ => {
                 println!("dupa");
             }
