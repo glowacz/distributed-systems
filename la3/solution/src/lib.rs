@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp, sync::Arc};
 
 use module_system::{Handler, ModuleRef, System};
 
@@ -29,7 +29,7 @@ pub struct Raft {
     config: ServerConfig,
     state_machine: Box<dyn StateMachine>,
     stable_storage: Box<dyn StableStorage>,
-    message_sender: Box<dyn RaftSender>,
+    message_sender: Arc<dyn RaftSender>,
     // TODO you can add fields to this struct.
 }
 
@@ -56,14 +56,15 @@ impl Raft {
                 config,
                 state_machine,
                 stable_storage,
-                message_sender,
+                message_sender: message_sender.into(),
             }
         ).await
     }
 
     async fn broadcast(&self, msg: RaftMessage) {
         let servers = self.config.servers.clone();
-        let message_sender = self.message_sender;
+        // cloning just the Arc (to the RaftSender which is on the heap (it has unknown concrete type))
+        let message_sender = self.message_sender.clone();
         let self_id = self.config.self_id;
 
         tokio::spawn( async move {
@@ -71,8 +72,9 @@ impl Raft {
             for uuid in servers {
                 if uuid != self_id {
                     let sender = message_sender.clone();
+                    let msg = msg.clone();
                     set.spawn(async move {
-                        message_sender.send(&uuid, msg.clone()).await;
+                        sender.send(&uuid, msg).await;
                     });    
                 }
             }
@@ -202,7 +204,9 @@ impl Raft {
             } => {
                 match self.role {
                     Role::Leader => {
-                        println!("du");
+                        self.handle_command_leader(
+                            command, client_id, sequence_num, lowest_sequence_num_without_response
+                        ).await;
                     }
                     _ => {
                         let resp = ClientRequestResponse::CommandResponse(
