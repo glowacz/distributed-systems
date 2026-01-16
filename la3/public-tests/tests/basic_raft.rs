@@ -5,10 +5,33 @@ use ntest::timeout;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::Instant;
 use uuid::Uuid;
+use std::io::Write;
+use chrono::Local;
+
+fn init_logs() {
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Trace)
+        // .format(|buf, record| { // NO Timestamps
+        //     writeln!(buf, "{}", record.args())
+        // })
+        .format(|buf, record| { // precise timestamps
+            writeln!(
+                buf,
+                "{} [{}] - {}",
+                Local::now().format("%M:%S%.3f"),
+                record.level(),
+                record.args()
+            )
+        })
+        .try_init();
+}
 
 #[tokio::test]
 #[timeout(1000)]
 async fn system_makes_progress_when_there_is_a_majority() {
+    init_logs();
+
     // given
     let mut system = System::new().await;
 
@@ -60,7 +83,9 @@ async fn system_makes_progress_when_there_is_a_majority() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[timeout(150)]
 async fn system_does_not_make_progress_without_majority() {
-    // given
+    init_logs();
+
+// given
     let mut system = System::new().await;
 
     let entry_data = vec![1, 2, 3, 4, 5];
@@ -106,7 +131,9 @@ async fn system_does_not_make_progress_without_majority() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[timeout(150)]
 async fn follower_denies_vote_for_candidate_with_outdated_log() {
-    // given
+    init_logs();
+
+// given
     let mut system = System::new().await;
 
     let (tx, mut rx) = unbounded_channel();
@@ -239,7 +266,9 @@ async fn follower_denies_vote_for_candidate_with_outdated_log() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[timeout(50)]
 async fn follower_rejects_inconsistent_append_entry() {
-    // given
+    init_logs();
+
+// given
     let mut system = System::new().await;
 
     let (tx, mut rx) = unbounded_channel();
@@ -351,7 +380,9 @@ async fn follower_rejects_inconsistent_append_entry() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[timeout(50)]
 async fn follower_redirects_to_leader() {
-    // given
+    init_logs();
+
+// given
     let mut system = System::new().await;
     let processes = make_idents();
     let [leader_id, follower_id] = processes;
@@ -494,7 +525,9 @@ async fn leader_steps_down_without_heartbeat_responses_from_majority() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[timeout(100)]
 async fn follower_ignores_request_vote_within_election_timeout_of_leader_heartbeat() {
-    // given
+    init_logs();
+
+// given
     let mut system = System::new().await;
     let processes = make_idents();
     let [leader_id, follower_id, spy_id] = processes;

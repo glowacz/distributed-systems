@@ -1,5 +1,6 @@
 use std::{cmp, collections::{HashMap, HashSet}, sync::Arc};
 
+use log::{debug, error};
 use module_system::{Handler, ModuleRef, System};
 
 pub use domain::*;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 mod domain;
 
+#[derive(Debug)]
 enum Role {
     Leader,
     Candidate,
@@ -96,17 +98,24 @@ impl Raft {
         let message_sender = self.message_sender.clone();
         let self_id = self.config.self_id;
 
+        // error!("[{}]: starting broadcast", self_id);
+
         tokio::spawn( async move {
+            // error!("[{}]: spawned broadcast task", self_id);
             let mut set = JoinSet::new();
             for uuid in servers {
+                // error!("[{}, broadcast]: in loop for sending to {}", self_id, uuid);
                 if uuid != self_id {
                     let sender = message_sender.clone();
                     let msg = msg.clone();
                     set.spawn(async move {
+                        // error!("[{}, broadcast]: before sending to {}", self_id, uuid);
                         sender.send(&uuid, msg).await;
-                    });    
+                        // error!("[{}, broadcast]: after sending to {}", self_id, uuid);
+                    });
                 }
             }
+            set.join_all().await;
         });
     }
 
@@ -409,8 +418,8 @@ impl Raft {
             header: RaftMessageHeader { source: self.config.self_id, term: self.current_term },
             content: RaftMessageContent::AppendEntries(
                 AppendEntriesArgs { 
-                    prev_log_index: self.log.len() - 1, 
-                    prev_log_term: if self.log.len() >= 2 { self.log[self.log.len() - 2].term} else { 0 },
+                    prev_log_index: self.log.len(), 
+                    prev_log_term: if self.log.len() >= 1 { self.log[self.log.len() - 1].term } else { 0 },
                     entries: vec![],
                     leader_commit: self.commit_index 
                 }
@@ -421,6 +430,7 @@ impl Raft {
     }
 
     async fn assert_leadership(&mut self) {
+        debug!("[{}]: CONVERTING TO LEADER", self.config.self_id);
         self.role = Role::Leader;
         self.broadcast_heartbeats().await;
         let _ = self.send_heartbeats_on_off_tx.send(()).await;
@@ -512,6 +522,8 @@ impl Raft {
     }
 
     async fn handle_election_timeout(&mut self) {
+        debug!("[{}]: CONVERTING FROM {:?} TO CANDIDATE", self.config.self_id, self.role);
+
         self.received_votes.clear();
 
         self.current_term += 1;
@@ -519,7 +531,9 @@ impl Raft {
         self.voted_for = Some(self.config.self_id);
         self.received_votes.insert(self.config.self_id);
 
+        // error!("[{}]: before sending election_reset", self.config.self_id);
         let _ = self.election_reset_tx.send(()).await;
+        // error!("[{}]: after sending election_reset", self.config.self_id);
 
         let msg = RaftMessage {
             header: RaftMessageHeader {
@@ -529,10 +543,12 @@ impl Raft {
             content: RaftMessageContent::RequestVote(
                 RequestVoteArgs { 
                     last_log_index: self.log.len(), 
-                    last_log_term: self.log[self.log.len() - 1].term 
+                    last_log_term: if self.log.len() > 0 { self.log[self.log.len() - 1].term } else { 0 }
                 }
             ),
         };
+
+        // error!("[{}]: before sending election broadcast", self.config.self_id);
         self.broadcast(msg).await;
     }
 }
@@ -547,22 +563,30 @@ impl Handler<RaftMessage> for Raft {
                 let _ = self.send_heartbeats_on_off_tx.send(()).await;
             }
             self.role = Role::Follower;
+
+            debug!("[{}]: CONVERTING TO FOLLOWER", self.config.self_id);
         }
         match msg.content {
             RaftMessageContent::AppendEntries(args) => {
+                debug!("[{}]: got AppendEntries from {}", self.config.self_id, msg.header.source);
                 self.handle_append_entries(msg.header, args).await;
             },
             RaftMessageContent::AppendEntriesResponse(args) => {
+                debug!("[{}]: got AppendEntriesResponse from {}, success: {}", 
+                    self.config.self_id, msg.header.source, args.success);
                 self.handle_append_entries_response(msg.header, args).await;
             },
             RaftMessageContent::RequestVote(args) => {
+                debug!("[{}]: got RequestVote from {}", self.config.self_id, msg.header.source);
                 self.handle_request_vote(msg.header, args).await;
             },
             RaftMessageContent::RequestVoteResponse(args) => {
+                debug!("[{}]: got RequestVoteResponse from {}, vote_granted: {}", 
+                    self.config.self_id, msg.header.source, args.vote_granted);
                 self.handle_vote_response(msg.header, args).await;
             }
             _ => {
-                println!("dupa");
+                println!("dupa\n\n\n");
             }
         }
     }
@@ -571,6 +595,13 @@ impl Handler<RaftMessage> for Raft {
 #[async_trait::async_trait]
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
+        if let ClientRequestContent::Command { command: _, client_id, sequence_num, lowest_sequence_num_without_response: _ } = msg.content {
+            debug!("[{}]: got client request from {}, seq num {}\n\n\n", 
+             self.config.self_id, client_id, sequence_num);
+        } else {
+            debug!("[{}]: got OTHER CLIENT REQUEST\n\n\n", self.config.self_id);
+        }
+        
         self.handle_client_request(msg).await;
     }
 }
@@ -579,6 +610,7 @@ impl Handler<ClientRequest> for Raft {
 impl Handler<ElectionTimeout> for Raft {
     async fn handle(&mut self, _msg: ElectionTimeout) {
         if let Role::Leader = self.role { } else {
+            debug!("[{}]: starting election", self.config.self_id);
             self.handle_election_timeout().await;
         }
     }
