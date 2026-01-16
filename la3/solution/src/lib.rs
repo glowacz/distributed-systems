@@ -34,6 +34,7 @@ pub struct Raft {
     next_index: HashMap<Uuid, usize>,
     match_index: HashMap<Uuid, usize>,
     waiting_channels: HashMap<(Uuid, u64), UnboundedSender<ClientRequestResponse>>,
+    register_client_waiting_channels: HashMap<usize, UnboundedSender<ClientRequestResponse>>,
 
     known_leader: Option<Uuid>,
     self_ref: ModuleRef<Self>,
@@ -74,6 +75,7 @@ impl Raft {
                 next_index: HashMap::new(),
                 match_index: HashMap::new(),
                 waiting_channels: HashMap::new(),
+                register_client_waiting_channels: HashMap::new(),
                 known_leader: None,
                 self_ref,
                 election_reset_tx,
@@ -344,20 +346,36 @@ impl Raft {
             
             if idx < self.log.len() {
                 let entry = &self.log[idx];
-                
-                // Only commands produce output for clients
-                if let LogEntryContent::Command { data, client_id, sequence_num, .. } = &entry.content {
-                    let output = self.state_machine.apply(data).await;
-                    
-                    // Send response if we are holding a channel for this request
-                    if let Some(sender) = self.waiting_channels.remove(&(*client_id, *sequence_num)) {
-                         let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
-                            client_id: *client_id,
-                            sequence_num: *sequence_num,
-                            content: CommandResponseContent::CommandApplied { output }
-                        });
-                        let _ = sender.send(response);
-                    }
+
+                match &entry.content {
+                    LogEntryContent::Command { data, client_id, sequence_num, .. } => {
+                        let output = self.state_machine.apply(data).await;
+                        
+                        // Send response if we are holding a channel for this request
+                        if let Some(sender) = self.waiting_channels.remove(&(*client_id, *sequence_num)) {
+                             let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                                client_id: *client_id,
+                                sequence_num: *sequence_num,
+                                content: CommandResponseContent::CommandApplied { output }
+                            });
+                            let _ = sender.send(response);
+                        }
+                    },
+                    LogEntryContent::RegisterClient => {
+                        let client_id = Uuid::from_u128(idx as u128);
+
+                        if let Some(sender) = self.register_client_waiting_channels.remove(&(idx + 1)) {
+                            let response = ClientRequestResponse::RegisterClientResponse(
+                                RegisterClientResponseArgs { 
+                                    content: RegisterClientResponseContent::ClientRegistered { 
+                                        client_id
+                                    }
+                                }
+                            );
+                           let _ = sender.send(response);
+                       }
+                    },
+                    _ => { }
                 }
             }
         }
@@ -448,6 +466,41 @@ impl Raft {
         }
     }
 
+    async fn broadcast_append_entries(&self, log_entry: LogEntry) {
+        let msg = RaftMessage { 
+            header: RaftMessageHeader { 
+                source: self.config.self_id, 
+                term: self.current_term 
+            }, 
+            content: RaftMessageContent::AppendEntries(
+                AppendEntriesArgs { 
+                    prev_log_index: self.log.len() - 1, 
+                    prev_log_term: if self.log.len() >= 2 { self.log[self.log.len() - 2].term} else { 0 },
+                    entries: vec![log_entry],
+                    leader_commit: self.commit_index 
+                }
+            )
+        };
+        
+        self.broadcast(msg).await;
+    }
+
+    async fn handle_register_client_leader(&mut self, 
+        reply_to: UnboundedSender<ClientRequestResponse>
+    ) {
+        let log_entry = LogEntry {
+            content: LogEntryContent::RegisterClient,
+            term: self.current_term,
+            timestamp: self.config.system_boot_time.elapsed()
+        };
+
+        self.log.push(log_entry.clone());
+
+        self.register_client_waiting_channels.insert(self.log.len(), reply_to);
+
+        self.broadcast_append_entries(log_entry).await;
+    }
+
     async fn handle_command_leader(&mut self, 
         data: Vec<u8>,
         client_id: Uuid,
@@ -470,22 +523,7 @@ impl Raft {
 
         self.waiting_channels.insert((client_id, sequence_num), reply_to);
 
-        let msg = RaftMessage { 
-            header: RaftMessageHeader { 
-                source: self.config.self_id, 
-                term: self.current_term 
-            }, 
-            content: RaftMessageContent::AppendEntries(
-                AppendEntriesArgs { 
-                    prev_log_index: self.log.len() - 1, 
-                    prev_log_term: if self.log.len() >= 2 { self.log[self.log.len() - 2].term} else { 0 },
-                    entries: vec![log_entry],
-                    leader_commit: self.commit_index 
-                }
-            )
-        };
-        
-        self.broadcast(msg).await;
+        self.broadcast_append_entries(log_entry).await;
     }
 
     async fn handle_client_request(&mut self, msg: ClientRequest) {
@@ -508,6 +546,23 @@ impl Raft {
                                 sequence_num, 
                                 content: CommandResponseContent::NotLeader { 
                                     leader_hint: self.known_leader
+                                }
+                            }
+                        );
+                        let _ = reply_to.send(resp);
+                    }
+                }
+            }
+            ClientRequestContent::RegisterClient => {
+                match self.role {
+                    Role::Leader => {
+                        self.handle_register_client_leader(reply_to).await;
+                    }
+                    _ => {
+                        let resp = ClientRequestResponse::RegisterClientResponse(
+                            RegisterClientResponseArgs { 
+                                content: RegisterClientResponseContent::NotLeader { 
+                                    leader_hint: self.known_leader 
                                 }
                             }
                         );
@@ -596,8 +651,10 @@ impl Handler<RaftMessage> for Raft {
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
         if let ClientRequestContent::Command { command: _, client_id, sequence_num, lowest_sequence_num_without_response: _ } = msg.content {
-            debug!("[{}]: got client request from {}, seq num {}\n\n\n", 
+            debug!("[{}]: got client command from {}, seq num {}\n\n\n", 
              self.config.self_id, client_id, sequence_num);
+        } else if let ClientRequestContent::RegisterClient = msg.content {
+            debug!("[{}]: got register client request\n\n\n", self.config.self_id);
         } else {
             debug!("[{}]: got OTHER CLIENT REQUEST\n\n\n", self.config.self_id);
         }
