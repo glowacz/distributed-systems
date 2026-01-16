@@ -18,6 +18,7 @@ enum Role {
 }
 
 struct ElectionTimeout;
+struct HeartbeatTimeout;
 
 #[non_exhaustive]
 pub struct Raft {
@@ -377,6 +378,49 @@ impl Raft {
         }
     }
 
+    async fn trigger_heartbeat_timeout(self_ref: ModuleRef<Self>, heartbeat_timeout: Duration) {
+        tokio::spawn(async move {
+            loop {
+                sleep(heartbeat_timeout).await;
+                self_ref.send(HeartbeatTimeout).await;
+            }
+        });
+    }
+
+    async fn broadcast_heartbeats(&self) {
+        let heartbeat_msg = RaftMessage {
+            header: RaftMessageHeader { source: self.config.self_id, term: self.current_term },
+            content: RaftMessageContent::AppendEntries(
+                AppendEntriesArgs { 
+                    prev_log_index: self.log.len() - 1, 
+                    prev_log_term: if self.log.len() >= 2 { self.log[self.log.len() - 2].term} else { 0 },
+                    entries: vec![],
+                    leader_commit: self.commit_index 
+                }
+            )
+        };
+
+        self.broadcast(heartbeat_msg).await;
+    }
+
+    async fn assert_leadership(&mut self) {
+        self.role = Role::Leader;
+        self.broadcast_heartbeats().await;
+        Self::trigger_heartbeat_timeout(self.self_ref.clone(), self.config.heartbeat_timeout).await;
+    }
+
+    async fn handle_vote_response(&mut self, header: RaftMessageHeader, args: RequestVoteResponseArgs) {
+        if let Role::Candidate = self.role {
+            if args.vote_granted {
+                self.received_votes.insert(header.source);
+
+                if self.received_votes.len() > self.config.servers.len() / 2 {
+                    self.assert_leadership().await;
+                }
+            }
+        }
+    }
+
     async fn handle_command_leader(&mut self, 
         data: Vec<u8>,
         client_id: Uuid,
@@ -455,6 +499,8 @@ impl Raft {
 
         self.current_term += 1;
         self.role = Role::Candidate;
+        self.voted_for = Some(self.config.self_id);
+        self.received_votes.insert(self.config.self_id);
 
         let _ = self.election_reset_tx.send(()).await;
 
@@ -491,6 +537,9 @@ impl Handler<RaftMessage> for Raft {
             },
             RaftMessageContent::RequestVote(args) => {
                 self.handle_request_vote(msg.header, args).await;
+            },
+            RaftMessageContent::RequestVoteResponse(args) => {
+                self.handle_vote_response(msg.header, args).await;
             }
             _ => {
                 println!("dupa");
@@ -511,6 +560,15 @@ impl Handler<ElectionTimeout> for Raft {
     async fn handle(&mut self, _msg: ElectionTimeout) {
         if let Role::Leader = self.role { } else {
             self.handle_election_timeout().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<HeartbeatTimeout> for Raft {
+    async fn handle(&mut self, _msg: HeartbeatTimeout) {
+        if let Role::Leader = self.role {
+            self.broadcast_heartbeats().await;
         }
     }
 }
