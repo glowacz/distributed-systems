@@ -37,6 +37,7 @@ pub struct Raft {
     self_ref: ModuleRef<Self>,
     election_reset_tx: Sender<()>,
     received_votes: HashSet<Uuid>,
+    send_heartbeats_on_off_tx: Sender<()>,
 
     config: ServerConfig,
     state_machine: Box<dyn StateMachine>,
@@ -56,7 +57,9 @@ impl Raft {
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
         let (election_reset_tx, election_reset_rx) = channel::<()>(1000);
+        let (send_heartbeats_on_off_tx, send_heartbeats_on_off_rx) = channel::<()>(1000);
         let timeout_range = config.election_timeout_range.clone();
+        let heartbeat_timeout = config.heartbeat_timeout;
         
         let self_ref = system.register_module(|self_ref| 
             Raft {
@@ -73,6 +76,7 @@ impl Raft {
                 self_ref,
                 election_reset_tx,
                 received_votes: HashSet::new(),
+                send_heartbeats_on_off_tx,
                 config,
                 state_machine,
                 stable_storage,
@@ -81,6 +85,7 @@ impl Raft {
         ).await;
 
         Self::start_and_reset_election_timeout(self_ref.clone(), timeout_range, election_reset_rx).await;
+        Self::trigger_heartbeat_timeout(self_ref.clone(), heartbeat_timeout, send_heartbeats_on_off_rx).await;
 
         self_ref
     }
@@ -124,6 +129,28 @@ impl Raft {
         });
     }
 
+    async fn trigger_heartbeat_timeout(self_ref: ModuleRef<Self>, heartbeat_timeout: Duration, mut on_off_rx: Receiver<()>) {
+        tokio::spawn(async move {
+            loop {
+                on_off_rx.recv().await;
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        
+                        _ = on_off_rx.recv() => {
+                            break;
+                        }
+    
+                        _ = sleep(heartbeat_timeout) => {
+                            self_ref.send(HeartbeatTimeout).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     async fn send_append_entries_response(&mut self, target: Uuid, success: bool, last_verified_log_index: usize) {
         let response = RaftMessageContent::AppendEntriesResponse(AppendEntriesResponseArgs {
             success,
@@ -150,8 +177,9 @@ impl Raft {
         }
 
         if args.entries.is_empty() {
-            // TODO: handle this - restart election timeout
-            // and apply the entries up to the args.leader_commit
+            let _ = self.election_reset_tx.send(()).await;
+            self.apply_committed_entries().await;
+
             return;
         }
 
@@ -195,8 +223,6 @@ impl Raft {
         if args.leader_commit > self.commit_index as usize {
             self.commit_index = cmp::min(args.leader_commit, last_new_entry_index);
         }
-
-        // TODO: apply the operation to the state machine to state machine
 
         self.send_append_entries_response(header.source, true, last_new_entry_index).await;
     }
@@ -378,15 +404,6 @@ impl Raft {
         }
     }
 
-    async fn trigger_heartbeat_timeout(self_ref: ModuleRef<Self>, heartbeat_timeout: Duration) {
-        tokio::spawn(async move {
-            loop {
-                sleep(heartbeat_timeout).await;
-                self_ref.send(HeartbeatTimeout).await;
-            }
-        });
-    }
-
     async fn broadcast_heartbeats(&self) {
         let heartbeat_msg = RaftMessage {
             header: RaftMessageHeader { source: self.config.self_id, term: self.current_term },
@@ -406,7 +423,7 @@ impl Raft {
     async fn assert_leadership(&mut self) {
         self.role = Role::Leader;
         self.broadcast_heartbeats().await;
-        Self::trigger_heartbeat_timeout(self.self_ref.clone(), self.config.heartbeat_timeout).await;
+        let _ = self.send_heartbeats_on_off_tx.send(()).await;
     }
 
     async fn handle_vote_response(&mut self, header: RaftMessageHeader, args: RequestVoteResponseArgs) {
@@ -526,6 +543,9 @@ impl Handler<RaftMessage> for Raft {
         if msg.header.term > self.current_term {
             self.current_term = msg.header.term;
             self.voted_for = None;
+            if let Role::Leader = self.role {
+                let _ = self.send_heartbeats_on_off_tx.send(()).await;
+            }
             self.role = Role::Follower;
         }
         match msg.content {
@@ -563,6 +583,10 @@ impl Handler<ElectionTimeout> for Raft {
         }
     }
 }
+
+// for Heartbeats it is handled nicely and we shouldn't even get this HeartbeatTimeout message as leader
+// but for ElectionTimeout, a leader will just ignore it like above
+// this should still work, so I won't change it for now
 
 #[async_trait::async_trait]
 impl Handler<HeartbeatTimeout> for Raft {
