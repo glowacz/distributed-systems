@@ -1,5 +1,6 @@
 use std::{cmp, collections::{HashMap, HashSet}, sync::Arc};
 
+use bincode::{config::standard};
 use log::{debug, error};
 use module_system::{Handler, ModuleRef, System};
 
@@ -64,12 +65,15 @@ impl Raft {
         let timeout_range = config.election_timeout_range.clone();
         let heartbeat_timeout = config.heartbeat_timeout;
         
+        // let stable_storage_arc: Arc<dyn StableStorage> = stable_storage.into();
+        let (current_term, voted_for, log) = Self::read_from_stable_storage(stable_storage.as_ref()).await;
+        
         let self_ref = system.register_module(|self_ref| 
             Raft {
                 role: Role::Follower,
-                current_term: 0,
-                voted_for: None,
-                log: Vec::new(),
+                current_term,
+                voted_for,
+                log,
                 commit_index: 0,
                 last_applied: 0,
                 next_index: HashMap::new(),
@@ -92,6 +96,50 @@ impl Raft {
         Self::trigger_heartbeat_timeout(self_ref.clone(), heartbeat_timeout, send_heartbeats_on_off_rx).await;
 
         self_ref
+    }
+
+    async fn save_to_stable_storage(&mut self) {
+        let config = standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+
+        let current_term_serialized = encode_to_vec(&self.current_term).unwrap();
+        let _ = self.stable_storage.put("current_term", &current_term_serialized).await;
+
+        let voted_for_serialized = encode_to_vec(&self.voted_for).unwrap();
+        let _ = self.stable_storage.put("voted_for", &voted_for_serialized).await;
+
+        let log_serialized = encode_to_vec(&self.log).unwrap();
+        let _ = self.stable_storage.put("log", &log_serialized).await;
+    }
+
+    async fn read_from_stable_storage(stable_storage: &dyn StableStorage) -> (u64, Option<Uuid>, Vec<LogEntry>) {
+        let config = standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+
+        let current_term_opt = stable_storage.get("current_term").await;
+        let current_term = if let Some(vec) = current_term_opt {
+            let (current_term, _): (u64, usize) = decode_from_slice(&vec).unwrap();
+            // self.current_term = current_term;
+            current_term
+        } else { 0 };
+
+        let voted_for_opt = stable_storage.get("voted_for").await;
+        let voted_for = if let Some(vec) = voted_for_opt {
+            let (voted_for, _): (Option<Uuid>, usize) = decode_from_slice(&vec).unwrap();
+            // self.voted_for = voted_for;
+            voted_for
+        } else { None };
+
+        let log_opt = stable_storage.get("log").await;
+        let log = if let Some(vec) = log_opt {
+            let (log, _): (Vec<LogEntry>, usize) = decode_from_slice(&vec).unwrap();
+            // self.log = log;
+            log
+        } else { Vec::new() };
+
+        (current_term, voted_for, log)
     }
 
     async fn broadcast(&self, msg: RaftMessage) {
@@ -226,6 +274,8 @@ impl Raft {
             else {
                 self.log.push(new_entry.clone());
             }
+
+            self.save_to_stable_storage().await;
         }
         
         // 1-based, bc 0 is the special, initial value
@@ -424,6 +474,7 @@ impl Raft {
 
         if log_up_to_date {
             self.voted_for = Some(header.source);
+            self.save_to_stable_storage().await;
             let _ = self.election_reset_tx.send(()).await;
             self.send_request_vote_response(header.source, true).await;
         } else {
@@ -495,6 +546,7 @@ impl Raft {
         };
 
         self.log.push(log_entry.clone());
+        self.save_to_stable_storage().await;
 
         self.register_client_waiting_channels.insert(self.log.len(), reply_to);
 
@@ -520,6 +572,7 @@ impl Raft {
         };
 
         self.log.push(log_entry.clone());
+        self.save_to_stable_storage().await;
 
         self.waiting_channels.insert((client_id, sequence_num), reply_to);
 
@@ -586,6 +639,8 @@ impl Raft {
         self.voted_for = Some(self.config.self_id);
         self.received_votes.insert(self.config.self_id);
 
+        self.save_to_stable_storage().await;
+
         // error!("[{}]: before sending election_reset", self.config.self_id);
         let _ = self.election_reset_tx.send(()).await;
         // error!("[{}]: after sending election_reset", self.config.self_id);
@@ -618,6 +673,8 @@ impl Handler<RaftMessage> for Raft {
                 let _ = self.send_heartbeats_on_off_tx.send(()).await;
             }
             self.role = Role::Follower;
+
+            self.save_to_stable_storage().await;
 
             debug!("[{}]: CONVERTING TO FOLLOWER", self.config.self_id);
         }
