@@ -1,7 +1,6 @@
-use std::{cmp, collections::{HashMap, HashSet}, sync::Arc};
+use std::{cmp, collections::{HashMap, HashSet}, sync::Arc, time::Instant};
 
-use bincode::{config::standard};
-use log::{debug, error};
+use log::{debug};
 use module_system::{Handler, ModuleRef, System};
 
 pub use domain::*;
@@ -38,10 +37,10 @@ pub struct Raft {
     register_client_waiting_channels: HashMap<usize, UnboundedSender<ClientRequestResponse>>,
 
     known_leader: Option<Uuid>,
-    self_ref: ModuleRef<Self>,
     election_reset_tx: Sender<()>,
     received_votes: HashSet<Uuid>,
     send_heartbeats_on_off_tx: Sender<()>,
+    last_leader_contact: Option<Instant>,
 
     config: ServerConfig,
     state_machine: Box<dyn StateMachine>,
@@ -68,7 +67,9 @@ impl Raft {
         // let stable_storage_arc: Arc<dyn StableStorage> = stable_storage.into();
         let (current_term, voted_for, log) = Self::read_from_stable_storage(stable_storage.as_ref()).await;
         
-        let self_ref = system.register_module(|self_ref| 
+        debug!("{}: registering module", config.self_id);
+
+        let self_ref = system.register_module(|_self_ref| 
             Raft {
                 role: Role::Follower,
                 current_term,
@@ -81,10 +82,10 @@ impl Raft {
                 waiting_channels: HashMap::new(),
                 register_client_waiting_channels: HashMap::new(),
                 known_leader: None,
-                self_ref,
                 election_reset_tx,
                 received_votes: HashSet::new(),
                 send_heartbeats_on_off_tx,
+                last_leader_contact: None,
                 config,
                 state_machine,
                 stable_storage,
@@ -99,9 +100,9 @@ impl Raft {
     }
 
     async fn save_to_stable_storage(&mut self) {
-        let config = standard()
-            .with_big_endian()
-            .with_fixed_int_encoding();
+        // let config = standard()
+        //     .with_big_endian()
+        //     .with_fixed_int_encoding();
 
         let current_term_serialized = encode_to_vec(&self.current_term).unwrap();
         let _ = self.stable_storage.put("current_term", &current_term_serialized).await;
@@ -114,9 +115,9 @@ impl Raft {
     }
 
     async fn read_from_stable_storage(stable_storage: &dyn StableStorage) -> (u64, Option<Uuid>, Vec<LogEntry>) {
-        let config = standard()
-            .with_big_endian()
-            .with_fixed_int_encoding();
+        // let config = standard()
+        //     .with_big_endian()
+        //     .with_fixed_int_encoding();
 
         let current_term_opt = stable_storage.get("current_term").await;
         let current_term = if let Some(vec) = current_term_opt {
@@ -159,6 +160,7 @@ impl Raft {
                     let sender = message_sender.clone();
                     let msg = msg.clone();
                     set.spawn(async move {
+                        debug!("[{}]: sending (broadcast) msg {:?} to {}", self_id, msg, uuid);
                         // error!("[{}, broadcast]: before sending to {}", self_id, uuid);
                         sender.send(&uuid, msg).await;
                         // error!("[{}, broadcast]: after sending to {}", self_id, uuid);
@@ -235,6 +237,8 @@ impl Raft {
             return;
         }
 
+        self.last_leader_contact = Some(Instant::now());
+
         if args.entries.is_empty() {
             let _ = self.election_reset_tx.send(()).await;
             self.apply_committed_entries().await;
@@ -256,6 +260,8 @@ impl Raft {
         };
 
         if !log_ok {
+            debug!("[{}]: LOG NOT OK, GOT APPEND_ENTRIES WITH prev_log_index {}; our prev_log_term is {}\n\n\n", 
+                self.config.self_id, args.prev_log_index, self.log.len());
             self.send_append_entries_response(header.source, false, 0).await;
             return;
         }
@@ -304,8 +310,10 @@ impl Raft {
             }
         };
 
+        debug!("[{}]: sending AppendEntries with prev_log_index {} and log {:?}\n\n\n", self.config.self_id, prev_log_index, self.log[prev_log_index..].to_vec());
+
         let entries = if prev_log_index < self.log.len() {
-             self.log[prev_log_index..].to_vec()
+            self.log[prev_log_index..].to_vec()
         } else {
             Vec::new()
         };
@@ -483,6 +491,9 @@ impl Raft {
     }
 
     async fn broadcast_heartbeats(&self) {
+        debug!("[{}]: broadcasting heartbeats | current term is {} | log is {:?}",
+         self.config.self_id, self.current_term, self.log);
+
         let heartbeat_msg = RaftMessage {
             header: RaftMessageHeader { source: self.config.self_id, term: self.current_term },
             content: RaftMessageContent::AppendEntries(
@@ -501,7 +512,21 @@ impl Raft {
     async fn assert_leadership(&mut self) {
         debug!("[{}]: CONVERTING TO LEADER", self.config.self_id);
         self.role = Role::Leader;
-        self.broadcast_heartbeats().await;
+        
+        let log_entry = LogEntry {
+            content: LogEntryContent::NoOp,
+            term: self.current_term,
+            timestamp: self.config.system_boot_time.elapsed()
+        };
+
+        self.log.push(log_entry.clone());
+
+        debug!("[{}]: broadcasting APPEND ENTRIES | current term is {} | log is {:?}",
+         self.config.self_id, self.current_term, self.log);
+
+        self.broadcast_append_entries(log_entry).await;
+        
+        // self.broadcast_heartbeats().await;
         let _ = self.send_heartbeats_on_off_tx.send(()).await;
     }
 
@@ -666,6 +691,24 @@ impl Raft {
 #[async_trait::async_trait]
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
+        if let RaftMessageContent::RequestVote(_) = msg.content {
+            if let Some(last_contact) = self.last_leader_contact {
+                let min_election_timeout = *self.config.election_timeout_range.start();
+
+                if last_contact.elapsed() < min_election_timeout {
+                    debug!("[{}]: ignoring RequestVote from {} (leader is active)\n\n\n", 
+                           self.config.self_id, msg.header.source);
+                    return;
+                }
+            }
+
+            if let Role::Leader = self.role {
+                debug!("[{}]: ignoring RequestVote from {} (we are the leader)\n\n\n", 
+                       self.config.self_id, msg.header.source);
+                return;
+            }
+        }
+
         if msg.header.term > self.current_term {
             self.current_term = msg.header.term;
             self.voted_for = None;
@@ -676,11 +719,13 @@ impl Handler<RaftMessage> for Raft {
 
             self.save_to_stable_storage().await;
 
-            debug!("[{}]: CONVERTING TO FOLLOWER", self.config.self_id);
+            debug!("[{}]: CONVERTING TO FOLLOWER ||| current term is {}", 
+             self.config.self_id, self.current_term);
         }
         match msg.content {
             RaftMessageContent::AppendEntries(args) => {
-                debug!("[{}]: got AppendEntries from {}", self.config.self_id, msg.header.source);
+                debug!("[{}]: got AppendEntries from {} | current term is {} | log is {:?}",
+                 self.config.self_id, msg.header.source, self.current_term, self.log);
                 self.handle_append_entries(msg.header, args).await;
             },
             RaftMessageContent::AppendEntriesResponse(args) => {
